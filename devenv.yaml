@@ -1,8 +1,10 @@
 # yaml-language-server: $schema=https://devenv.sh/devenv.schema.json
 inputs:
-  davids-devenvs:
-    url: github:dszakallas/devenvs
-    flake: false
+  bikeshed:
+    url: github:dszakallas/bikeshed
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
   flake-utils:
     url: github:numtide/flake-utils
   git-hooks:
@@ -12,6 +14,3 @@ inputs:
         follows: nixpkgs
   nixpkgs:
     url: github:NixOS/nixpkgs/nixpkgs-unstable
-imports:
-- davids-devenvs/recommended
-- davids-devenvs/go

@@ -6,6 +6,11 @@
   ...
 }:
 {
+  imports = [
+    inputs.bikeshed.devenvModules.recommended
+    inputs.bikeshed.devenvModules.go
+  ];
+
   options = {
     version = lib.mkOption {
       type = pkgs.lib.types.str;
@@ -13,9 +18,8 @@
       description = "Version number for the package.";
     };
   };
-  config = {
-    packages = [ pkgs.git ];
 
+  config = {
     enterShell = ''
       export PATH="$DEVENV_ROOT/bin:$PATH"
       go version
@@ -26,10 +30,41 @@
       make test
     '';
 
+    profiles.agents.module = {
+      imports = [
+        inputs.bikeshed.devenvModules.agents
+      ];
+
+      agents = {
+        skills = {
+          enable = true;
+          entries = {
+            cc-skills-golang = (inputs.bikeshed.packages.${pkgs.system}.agentskills.cc-skills-golang.override {
+              include = [
+                "golang-cli"
+                "golang-code-style"
+                "golang-data-structures"
+                "golang-error-handling"
+                "golang-testing"
+                "golang-lint"
+              ];
+            });
+          };
+        };
+      }
+      // (lib.genAttrs
+        (builtins.filter (h: h != "antigravity") inputs.bikeshed.lib.agents.popularHarnesses)
+        (_: {
+          enable = true;
+          linkSkills = true;
+        })
+      );
+    };
+
     outputs =
       let
         params = {
-          vendorHash = "sha256-9xZrmsJxxqB+Shluy3KtxRQxxJwm3tzhJLMG6KfbJhM=";
+          vendorHash = "sha256-n+lKbSCktXNgqTLSG++AWdItai7jDFGSAJTQs5hC23w=";
           version = config.version;
         };
       in

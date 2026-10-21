@@ -36,6 +36,15 @@ go.work.sum
 .devenv*
 devenv.local.nix
 
+# Agent harness artifacts
+.agents/
+.claude/
+.codex/
+.copilot/
+.gemini/
+.opencode/
+.pi/
+
 # direnv
 .direnv
 
