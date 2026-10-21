@@ -15,9 +15,9 @@ spec:
         fnpLoadingOptions:
           enableExec: true
   targets:
-  - select:
-      kind: ConfigMap
-    fieldPaths:
-    - data.[inner.yaml]
-    options:
-      create: true
+    - select:
+        kind: ConfigMap
+      fieldPaths:
+        - data.[inner.yaml]
+      options:
+        create: true

@@ -26,9 +26,33 @@
     '';
 
     enterTest = ''
-      make lint
       make test
     '';
+
+    git-hooks.hooks = {
+      nixfmt.enable = true;
+
+      markdownlint.enable = true;
+
+      golangci-lint.enable = true;
+
+      golangci-lint-fmt = {
+        enable = true;
+        name = "golangci-lint fmt";
+        entry = "${pkgs.golangci-lint}/bin/golangci-lint fmt";
+        files = "\\.go$";
+        before = [ "golangci-lint" ];
+      };
+
+      prettier = {
+        enable = true;
+        types_or = [
+          "json"
+          "yaml"
+        ];
+        excludes = [ "^test/.*/out\\.yaml$" ];
+      };
+    };
 
     profiles.agents.module = {
       imports = [
@@ -39,16 +63,18 @@
         skills = {
           enable = true;
           entries = {
-            cc-skills-golang = (inputs.bikeshed.packages.${pkgs.system}.agentskills.cc-skills-golang.override {
-              include = [
-                "golang-cli"
-                "golang-code-style"
-                "golang-data-structures"
-                "golang-error-handling"
-                "golang-testing"
-                "golang-lint"
-              ];
-            });
+            cc-skills-golang = (
+              inputs.bikeshed.packages.${pkgs.system}.agentskills.cc-skills-golang.override {
+                include = [
+                  "golang-cli"
+                  "golang-code-style"
+                  "golang-data-structures"
+                  "golang-error-handling"
+                  "golang-testing"
+                  "golang-lint"
+                ];
+              }
+            );
           };
         };
       }

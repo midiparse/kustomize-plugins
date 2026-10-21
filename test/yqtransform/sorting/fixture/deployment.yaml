@@ -13,25 +13,25 @@ spec:
         app: test
     spec:
       containers:
-      - name: container1
-        image: nginx:latest
-        env:
-        - name: ZEBRA
-          value: "z"
-        - name: ALPHA
-          value: "a"
-        - name: DELTA
-          value: "d"
-        - name: BETA
-          value: "b"
-      - name: container2
-        image: redis:latest
-        env:
-        - name: YELLOW
-          value: "y"
-        - name: CHARLIE
-          value: "c"
-        - name: XRAY
-          value: "x"
-        - name: ECHO
-          value: "e"
+        - name: container1
+          image: nginx:latest
+          env:
+            - name: ZEBRA
+              value: "z"
+            - name: ALPHA
+              value: "a"
+            - name: DELTA
+              value: "d"
+            - name: BETA
+              value: "b"
+        - name: container2
+          image: redis:latest
+          env:
+            - name: YELLOW
+              value: "y"
+            - name: CHARLIE
+              value: "c"
+            - name: XRAY
+              value: "x"
+            - name: ECHO
+              value: "e"

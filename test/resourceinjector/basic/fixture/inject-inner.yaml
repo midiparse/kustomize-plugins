@@ -11,9 +11,9 @@ spec:
     path: ./inner.yaml
     fieldPath: spec
   targets:
-  - select:
-      kind: ConfigMap
-    fieldPaths:
-    - data.[inner.yaml]
-    options:
-      create: true
+    - select:
+        kind: ConfigMap
+      fieldPaths:
+        - data.[inner.yaml]
+      options:
+        create: true
