@@ -27,6 +27,7 @@ jobs:
       - name: Build for ${{ matrix.platform }}
         run: |
           devenv build outputs.default.${{ matrix.platform }} \
+            | jq -er --arg key "outputs.default.${{ matrix.platform }}" '.[$key]' \
             | tee kustomize-plugins-${{ matrix.platform }}.pth
       - name: Create tarball
         run: |
