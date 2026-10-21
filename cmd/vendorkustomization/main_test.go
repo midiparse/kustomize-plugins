@@ -16,24 +16,20 @@ import (
 	"sigs.k8s.io/kustomize/kyaml/yaml"
 )
 
-type mockDownloader struct {
+type mockFetcher struct {
 	called bool
 	data   []byte
 	err    error
 }
 
-func (m *mockDownloader) Download(ctx context.Context, repo, version, asset string) ([]byte, error) {
+func (m *mockFetcher) Fetch(ctx context.Context, repo, version, asset string) ([]byte, error) {
 	m.called = true
 	return m.data, m.err
 }
 
 func TestCacheHitWithoutNetwork(t *testing.T) {
-	origDir, err := os.Getwd()
-	require.NoError(t, err)
-	defer func() { _ = os.Chdir(origDir) }()
-
 	tmpDir := t.TempDir()
-	require.NoError(t, os.Chdir(tmpDir))
+	t.Chdir(tmpDir)
 
 	manifestContent := `apiVersion: v1
 kind: ConfigMap
@@ -71,18 +67,17 @@ status:
 	genPath := filepath.Join(tmpDir, "generator.yaml")
 	require.NoError(t, os.WriteFile(genPath, []byte(genContent), 0644))
 
-	mock := &mockDownloader{}
-	oldDownloader := defaultDownloader
-	defaultDownloader = mock
-	defer func() { defaultDownloader = oldDownloader }()
+	mock := &mockFetcher{}
 
 	api := &API{
-		Metadata: Metadata{Name: "test-cache-hit"},
+		APIVersion: "kustomize-plugins.midiparse.github.com/v1alpha1",
+		Metadata:   Metadata{Name: "test-cache-hit"},
+		Fetcher:    mock,
 		Spec: SpecUnion{
 			IsSingle: true,
 			Items: []SpecItem{
 				{
-					Source: Source{
+					Source: &GithubReleaseSource{
 						Type:    "githubRelease",
 						Repo:    "example/test-repo",
 						Version: "v1.0.0",
@@ -98,7 +93,7 @@ status:
 				{
 					Destination: vendorPath,
 					Hash:        hash,
-					Source: Source{
+					Source: &GithubReleaseSource{
 						Type:    "githubRelease",
 						Repo:    "example/test-repo",
 						Version: "v1.0.0",
@@ -111,7 +106,7 @@ status:
 
 	nodes, err := api.Filter(nil)
 	require.NoError(t, err)
-	assert.False(t, mock.called, "downloader should NOT be called on cache hit")
+	assert.False(t, mock.called, "fetcher should NOT be called on cache hit")
 	require.Len(t, nodes, 1)
 	assert.Equal(t, "ConfigMap", nodes[0].GetKind())
 	assert.Equal(t, "cached-cm", nodes[0].GetName())
@@ -123,12 +118,8 @@ status:
 }
 
 func TestCacheMissDownloadAndStatusWriteBackWithComments(t *testing.T) {
-	origDir, err := os.Getwd()
-	require.NoError(t, err)
-	defer func() { _ = os.Chdir(origDir) }()
-
 	tmpDir := t.TempDir()
-	require.NoError(t, os.Chdir(tmpDir))
+	t.Chdir(tmpDir)
 
 	genContent := `apiVersion: kustomize-plugins.midiparse.github.com/v1alpha1
 kind: VendorKustomization
@@ -168,18 +159,17 @@ kind: Service
 metadata:
   name: sandbox-service
 `
-	mock := &mockDownloader{data: []byte(downloadedYaml)}
-	oldDownloader := defaultDownloader
-	defaultDownloader = mock
-	defer func() { defaultDownloader = oldDownloader }()
+	mock := &mockFetcher{data: []byte(downloadedYaml)}
 
 	api := &API{
-		Metadata: Metadata{Name: "agent-sandbox"},
+		APIVersion: "kustomize-plugins.midiparse.github.com/v1alpha1",
+		Metadata:   Metadata{Name: "agent-sandbox"},
+		Fetcher:    mock,
 		Spec: SpecUnion{
 			IsSingle: true,
 			Items: []SpecItem{
 				{
-					Source: Source{
+					Source: &GithubReleaseSource{
 						Type:    "githubRelease",
 						Repo:    "kubernetes-sigs/agent-sandbox",
 						Version: "v1.0.7",
@@ -192,7 +182,7 @@ metadata:
 
 	nodes, err := api.Filter(nil)
 	require.NoError(t, err)
-	assert.True(t, mock.called, "downloader should have been called on cache miss")
+	assert.True(t, mock.called, "fetcher should have been called on cache miss")
 	require.Len(t, nodes, 2)
 	assert.Equal(t, "Deployment", nodes[0].GetKind())
 	assert.Equal(t, "Service", nodes[1].GetKind())
@@ -218,19 +208,123 @@ metadata:
 	mock.called = false
 	var updatedAPI API
 	require.NoError(t, yaml.Unmarshal(updatedGenBytes, &updatedAPI))
+	updatedAPI.Fetcher = mock
 	nodes2, err := updatedAPI.Filter(nil)
 	require.NoError(t, err)
 	assert.False(t, mock.called, "second run should be cache hit")
 	require.Len(t, nodes2, 2)
 }
 
-func TestArraySourcesSupport(t *testing.T) {
-	origDir, err := os.Getwd()
-	require.NoError(t, err)
-	defer func() { _ = os.Chdir(origDir) }()
-
+func TestStatusWriteBackSelectsMatchingDocument(t *testing.T) {
 	tmpDir := t.TempDir()
-	require.NoError(t, os.Chdir(tmpDir))
+	t.Chdir(tmpDir)
+
+	genContent := `apiVersion: kustomize-plugins.midiparse.github.com/v1alpha1
+kind: VendorKustomization
+metadata:
+  name: other
+# keep-first
+spec:
+  source:
+    type: githubRelease
+    repo: other/repo
+    version: v1.0.0
+    asset: other.yaml
+status:
+  destination: vendor/other.yaml
+  hash: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  source:
+    type: githubRelease
+    repo: other/repo
+    version: v1.0.0
+    asset: other.yaml
+---
+apiVersion: example.com/v1alpha1
+kind: VendorKustomization
+metadata:
+  name: target
+# keep-second
+spec:
+  source:
+    type: githubRelease
+    repo: example/repo
+    version: v1.0.0
+    asset: target.yaml
+status:
+  destination: vendor/old-target.yaml
+  hash: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  source:
+    type: githubRelease
+    repo: example/repo
+    version: v1.0.0
+    asset: target.yaml
+---
+apiVersion: kustomize-plugins.midiparse.github.com/v1alpha1
+kind: VendorKustomization
+metadata:
+  name: target
+# keep-third
+spec:
+  source:
+    type: githubRelease
+    repo: example/repo
+    version: v1.0.0
+    asset: target.yaml
+`
+	genPath := filepath.Join(tmpDir, "generators.yaml")
+	require.NoError(t, os.WriteFile(genPath, []byte(genContent), 0644))
+
+	kustContent := `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+generators:
+  - generators.yaml
+`
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "kustomization.yaml"), []byte(kustContent), 0644))
+
+	downloaded := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: target-cm\n"
+	api := &API{
+		APIVersion: "kustomize-plugins.midiparse.github.com/v1alpha1",
+		Metadata:   Metadata{Name: "target"},
+		Fetcher:    &mockFetcher{data: []byte(downloaded)},
+		Spec: SpecUnion{
+			IsSingle: true,
+			Items: []SpecItem{
+				{
+					Source: &GithubReleaseSource{
+						Type:    "githubRelease",
+						Repo:    "example/repo",
+						Version: "v1.0.0",
+						Asset:   "target.yaml",
+					},
+				},
+			},
+		},
+	}
+
+	_, err := api.Filter(nil)
+	require.NoError(t, err)
+
+	updated, err := os.ReadFile(genPath)
+	require.NoError(t, err)
+	updatedStr := string(updated)
+
+	docs, err := decodeDocuments(updated)
+	require.NoError(t, err)
+	require.Len(t, docs, 3)
+
+	assert.Contains(t, updatedStr, "# keep-first")
+	assert.Contains(t, updatedStr, "# keep-second")
+	assert.Contains(t, updatedStr, "# keep-third")
+	assert.Equal(t, 1, strings.Count(updatedStr, "destination: vendor/target.yaml"))
+	assert.Contains(t, updatedStr, "destination: vendor/other.yaml")
+	assert.Contains(t, updatedStr, "hash: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	assert.Contains(t, updatedStr, "hash: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	assert.Contains(t, updatedStr, fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(downloaded))))
+}
+
+func TestArraySourcesSupport(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
 
 	genContent := `apiVersion: kustomize-plugins.midiparse.github.com/v1alpha1
 kind: VendorKustomization
@@ -255,18 +349,16 @@ spec:
 	firstData := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm-first\n"
 	secondData := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm-second\n"
 
-	mock := &mockDownloader{}
-	oldDownloader := defaultDownloader
-	defaultDownloader = &mockMultiDownloader{
+	mock := &mockMultiFetcher{
 		responses: map[string][]byte{
 			"repo1/proj@v1.0.0/first.yaml":  []byte(firstData),
 			"repo2/proj@v2.0.0/second.yaml": []byte(secondData),
 		},
 	}
-	defer func() { defaultDownloader = oldDownloader }()
 
 	var api API
 	require.NoError(t, yaml.Unmarshal([]byte(genContent), &api))
+	api.Fetcher = mock
 	assert.False(t, api.Spec.IsSingle)
 	require.Len(t, api.Spec.Items, 2)
 
@@ -282,15 +374,13 @@ spec:
 	updatedGenStr := string(updatedGenBytes)
 	assert.Contains(t, updatedGenStr, "- destination: custom/first.yaml")
 	assert.Contains(t, updatedGenStr, "- destination: vendor/second.yaml")
-
-	_ = mock
 }
 
-type mockMultiDownloader struct {
+type mockMultiFetcher struct {
 	responses map[string][]byte
 }
 
-func (m *mockMultiDownloader) Download(ctx context.Context, repo, version, asset string) ([]byte, error) {
+func (m *mockMultiFetcher) Fetch(ctx context.Context, repo, version, asset string) ([]byte, error) {
 	key := fmt.Sprintf("%s@%s/%s", repo, version, asset)
 	if data, ok := m.responses[key]; ok {
 		return data, nil
@@ -298,7 +388,7 @@ func (m *mockMultiDownloader) Download(ctx context.Context, repo, version, asset
 	return nil, fmt.Errorf("not found: %s", key)
 }
 
-func TestHTTPDownloaderLiveServer(t *testing.T) {
+func TestHTTPFetcherLiveServer(t *testing.T) {
 	manifest := "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: test-ns\n"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/test-asset.yaml") {
@@ -312,25 +402,31 @@ func TestHTTPDownloaderLiveServer(t *testing.T) {
 
 	t.Setenv("GITHUB_BASE_URL", server.URL)
 
-	dl := &HTTPDownloader{}
-	data, err := dl.Download(context.Background(), "myorg/myrepo", "v1.2.3", "test-asset.yaml")
+	dl := &HTTPFetcher{}
+	data, err := dl.Fetch(context.Background(), "myorg/myrepo", "v1.2.3", "test-asset.yaml")
 	require.NoError(t, err)
 	assert.Equal(t, manifest, string(data))
 
 	// Test 404
-	_, err = dl.Download(context.Background(), "myorg/myrepo", "v1.2.3", "notfound.yaml")
+	_, err = dl.Fetch(context.Background(), "myorg/myrepo", "v1.2.3", "notfound.yaml")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "404")
 }
 
 func TestInputFiltering(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	downloaded := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: my-cm\n"
 	api := &API{
-		Metadata: Metadata{Name: "my-generator"},
+		APIVersion: "kustomize-plugins.midiparse.github.com/v1alpha1",
+		Metadata:   Metadata{Name: "my-generator"},
+		Fetcher:    &mockFetcher{data: []byte(downloaded)},
 		Spec: SpecUnion{
 			IsSingle: true,
 			Items: []SpecItem{
 				{
-					Source: Source{
+					Source: &GithubReleaseSource{
 						Type:    "githubRelease",
 						Repo:    "my/repo",
 						Version: "v1.0.0",
@@ -340,11 +436,6 @@ func TestInputFiltering(t *testing.T) {
 			},
 		},
 	}
-
-	tmpDir := t.TempDir()
-	origDir, _ := os.Getwd()
-	require.NoError(t, os.Chdir(tmpDir))
-	defer func() { _ = os.Chdir(origDir) }()
 
 	genYaml := `apiVersion: kustomize-plugins.midiparse.github.com/v1alpha1
 kind: VendorKustomization
@@ -358,11 +449,6 @@ spec:
     asset: res.yaml
 `
 	require.NoError(t, os.WriteFile("my-generator.yaml", []byte(genYaml), 0644))
-
-	downloaded := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: my-cm\n"
-	oldDownloader := defaultDownloader
-	defaultDownloader = &mockDownloader{data: []byte(downloaded)}
-	defer func() { defaultDownloader = oldDownloader }()
 
 	inputGenNode, err := yaml.Parse(genYaml)
 	require.NoError(t, err)
@@ -378,26 +464,111 @@ spec:
 	assert.Equal(t, "my-cm", out[1].GetName())
 }
 
+func TestUnsupportedSourceTypeRejected(t *testing.T) {
+	var api API
+	err := yaml.Unmarshal([]byte(`apiVersion: kustomize-plugins.midiparse.github.com/v1alpha1
+kind: VendorKustomization
+metadata:
+  name: invalid
+spec:
+  source:
+    type: helm
+    repo: example/repo
+    version: v1.0.0
+    asset: chart.yaml
+`), &api)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported source type")
+}
+
 func TestValidationErrors(t *testing.T) {
-	api := &API{
-		Spec: SpecUnion{
-			IsSingle: true,
-			Items: []SpecItem{
-				{
-					Source: Source{
-						Type: "invalidType",
+	newAPI := func() *API {
+		return &API{
+			APIVersion: "kustomize-plugins.midiparse.github.com/v1alpha1",
+			Metadata:   Metadata{Name: "validation"},
+			Fetcher:    &mockFetcher{},
+			Spec: SpecUnion{
+				IsSingle: true,
+				Items: []SpecItem{
+					{
+						Source: &GithubReleaseSource{
+							Type:    "githubRelease",
+							Repo:    "owner/repo",
+							Version: "v1.0.0",
+							Asset:   "asset.yaml",
+						},
 					},
 				},
 			},
+		}
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*API)
+		want   string
+	}{
+		{
+			name: "unsupported source type",
+			mutate: func(api *API) {
+				api.Spec.Items[0].Source.(*GithubReleaseSource).Type = "invalidType"
+			},
+			want: "unsupported source type",
+		},
+		{
+			name: "repo without owner",
+			mutate: func(api *API) {
+				api.Spec.Items[0].Source.(*GithubReleaseSource).Repo = "no-slash"
+			},
+			want: "<owner>/<repo>",
+		},
+		{
+			name: "missing version",
+			mutate: func(api *API) {
+				api.Spec.Items[0].Source.(*GithubReleaseSource).Version = ""
+			},
+			want: "source.version must be specified",
+		},
+		{
+			name: "missing asset",
+			mutate: func(api *API) {
+				api.Spec.Items[0].Source.(*GithubReleaseSource).Asset = ""
+			},
+			want: "source.asset must be specified",
+		},
+		{
+			name: "absolute destination",
+			mutate: func(api *API) {
+				api.Spec.Items[0].Destination = "/tmp/asset.yaml"
+			},
+			want: "must be a relative path",
+		},
+		{
+			name: "destination escapes project",
+			mutate: func(api *API) {
+				api.Spec.Items[0].Destination = "../asset.yaml"
+			},
+			want: "must be a relative path",
+		},
+		{
+			name: "default destination escapes project",
+			mutate: func(api *API) {
+				api.Spec.Items[0].Source.(*GithubReleaseSource).Asset = "../../asset.yaml"
+			},
+			want: "must be a relative path",
 		},
 	}
-	_, err := api.Filter(nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "unsupported source type")
 
-	api.Spec.Items[0].Source.Type = "githubRelease"
-	api.Spec.Items[0].Source.Repo = "no-slash"
-	_, err = api.Filter(nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "<owner>/<repo>")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			api := newAPI()
+			tt.mutate(api)
+
+			_, err := api.Filter(nil)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.want)
+		})
+	}
 }

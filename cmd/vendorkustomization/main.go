@@ -29,8 +29,6 @@ func main() {
 		command.StandaloneEnabled,
 		false,
 	)
-	command.AddGenerateDockerfile(cmd)
-
 	if err := cmd.Execute(); err != nil {
 		log.Fatalf("Error executing command: %v", err)
 	}
@@ -43,6 +41,8 @@ type API struct {
 	Metadata   Metadata    `json:"metadata" yaml:"metadata"`
 	Spec       SpecUnion   `json:"spec" yaml:"spec"`
 	Status     StatusUnion `json:"status,omitempty" yaml:"status,omitempty"`
+
+	Fetcher Fetcher `json:"-" yaml:"-"`
 }
 
 type Metadata struct {
@@ -51,16 +51,137 @@ type Metadata struct {
 	Annotations map[string]string `json:"annotations,omitempty" yaml:"annotations,omitempty"`
 }
 
-type Source struct {
+// Source is a type-specific asset source. Implementations validate their
+// configuration, suggest a destination path, download the asset to a path, and
+// identify themselves for cache comparisons.
+type Source interface {
+	SourceType() string
+	Validate() error
+	DefaultDestination() string
+	Download(ctx context.Context, fetcher Fetcher, dest string) (string, error)
+	Key() string
+}
+
+// GithubReleaseSource downloads a release asset from github.com.
+type GithubReleaseSource struct {
 	Type    string `json:"type" yaml:"type"`
 	Repo    string `json:"repo" yaml:"repo"`
 	Version string `json:"version" yaml:"version"`
 	Asset   string `json:"asset" yaml:"asset"`
 }
 
+func (s *GithubReleaseSource) SourceType() string {
+	return "githubRelease"
+}
+
+func (s *GithubReleaseSource) Validate() error {
+	if s.Type != "githubRelease" {
+		return fmt.Errorf("unsupported source type %q: only githubRelease is supported", s.Type)
+	}
+	if s.Repo == "" || !strings.Contains(s.Repo, "/") {
+		return fmt.Errorf("source.repo must be specified as <owner>/<repo>, got %q", s.Repo)
+	}
+	if s.Version == "" {
+		return fmt.Errorf("source.version must be specified")
+	}
+	if s.Asset == "" {
+		return fmt.Errorf("source.asset must be specified")
+	}
+	return nil
+}
+
+func (s *GithubReleaseSource) DefaultDestination() string {
+	return filepath.Join("vendor", s.Asset)
+}
+
+func (s *GithubReleaseSource) Key() string {
+	return strings.Join([]string{s.SourceType(), s.Repo, s.Version, s.Asset}, "\x00")
+}
+
+func (s *GithubReleaseSource) Download(ctx context.Context, fetcher Fetcher, dest string) (string, error) {
+	data, err := fetcher.Fetch(ctx, s.Repo, s.Version, s.Asset)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch asset %s@%s: %w", s.Repo, s.Version, err)
+	}
+
+	hash := fmt.Sprintf("sha256:%x", sha256.Sum256(data))
+
+	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+		return "", fmt.Errorf("failed to create destination directory for %s: %w", dest, err)
+	}
+	if err := writeFileAtomic(dest, data, 0644); err != nil {
+		return "", fmt.Errorf("failed to write vendored file %s: %w", dest, err)
+	}
+
+	return hash, nil
+}
+
+type sourceConfig struct {
+	Type    string `json:"type" yaml:"type"`
+	Repo    string `json:"repo" yaml:"repo"`
+	Version string `json:"version" yaml:"version"`
+	Asset   string `json:"asset" yaml:"asset"`
+}
+
+func (c sourceConfig) source() (Source, error) {
+	if c.Type == "" {
+		return nil, nil
+	}
+	switch c.Type {
+	case "githubRelease":
+		return &GithubReleaseSource{
+			Type:    c.Type,
+			Repo:    c.Repo,
+			Version: c.Version,
+			Asset:   c.Asset,
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported source type %q: only githubRelease is supported", c.Type)
+	}
+}
+
 type SpecItem struct {
 	Source      Source `json:"source" yaml:"source"`
 	Destination string `json:"destination,omitempty" yaml:"destination,omitempty"`
+}
+
+type specItemConfig struct {
+	Source      sourceConfig `json:"source" yaml:"source"`
+	Destination string       `json:"destination,omitempty" yaml:"destination,omitempty"`
+}
+
+func (s *SpecItem) UnmarshalJSON(b []byte) error {
+	var cfg specItemConfig
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		return err
+	}
+	src, err := cfg.Source.source()
+	if err != nil {
+		return err
+	}
+	if src == nil {
+		return fmt.Errorf("source.type must be specified")
+	}
+	s.Source = src
+	s.Destination = cfg.Destination
+	return nil
+}
+
+func (s *SpecItem) UnmarshalYAML(value *goyaml.Node) error {
+	var cfg specItemConfig
+	if err := value.Decode(&cfg); err != nil {
+		return err
+	}
+	src, err := cfg.Source.source()
+	if err != nil {
+		return err
+	}
+	if src == nil {
+		return fmt.Errorf("source.type must be specified")
+	}
+	s.Source = src
+	s.Destination = cfg.Destination
+	return nil
 }
 
 type StatusItem struct {
@@ -69,25 +190,64 @@ type StatusItem struct {
 	Source      Source `json:"source" yaml:"source"`
 }
 
+type statusItemConfig struct {
+	Destination string       `json:"destination" yaml:"destination"`
+	Hash        string       `json:"hash" yaml:"hash"`
+	Source      sourceConfig `json:"source" yaml:"source"`
+}
+
+func (s *StatusItem) UnmarshalJSON(b []byte) error {
+	var cfg statusItemConfig
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		return err
+	}
+	src, err := cfg.Source.source()
+	if err != nil {
+		return err
+	}
+	s.Destination = cfg.Destination
+	s.Hash = cfg.Hash
+	s.Source = src
+	return nil
+}
+
+func (s *StatusItem) UnmarshalYAML(value *goyaml.Node) error {
+	var cfg statusItemConfig
+	if err := value.Decode(&cfg); err != nil {
+		return err
+	}
+	src, err := cfg.Source.source()
+	if err != nil {
+		return err
+	}
+	s.Destination = cfg.Destination
+	s.Hash = cfg.Hash
+	s.Source = src
+	return nil
+}
+
 type SpecUnion struct {
 	Items    []SpecItem
 	IsSingle bool
 }
 
 func (s *SpecUnion) UnmarshalJSON(b []byte) error {
-	var single SpecItem
-	if err := json.Unmarshal(b, &single); err == nil && single.Source.Type != "" {
-		s.IsSingle = true
-		s.Items = []SpecItem{single}
-		return nil
+	trimmed := bytes.TrimSpace(b)
+	if len(trimmed) == 0 {
+		return fmt.Errorf("spec must not be empty")
 	}
-	var list []SpecItem
-	if err := json.Unmarshal(b, &list); err == nil {
+	if trimmed[0] == '[' {
 		s.IsSingle = false
-		s.Items = list
-		return nil
+		return json.Unmarshal(trimmed, &s.Items)
 	}
-	return fmt.Errorf("failed to unmarshal spec as single item or list: %s", string(b))
+
+	s.IsSingle = true
+	var single SpecItem
+	if err := json.Unmarshal(trimmed, &single); err != nil {
+		return err
+	}
+	s.Items = []SpecItem{single}
+	return nil
 }
 
 func (s *SpecUnion) UnmarshalYAML(value *goyaml.Node) error {
@@ -113,22 +273,22 @@ type StatusUnion struct {
 }
 
 func (s *StatusUnion) UnmarshalJSON(b []byte) error {
-	if len(b) == 0 || string(b) == "null" {
+	trimmed := bytes.TrimSpace(b)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
 		return nil
 	}
-	var single StatusItem
-	if err := json.Unmarshal(b, &single); err == nil && (single.Destination != "" || single.Hash != "") {
-		s.IsSingle = true
-		s.Items = []StatusItem{single}
-		return nil
-	}
-	var list []StatusItem
-	if err := json.Unmarshal(b, &list); err == nil {
+	if trimmed[0] == '[' {
 		s.IsSingle = false
-		s.Items = list
-		return nil
+		return json.Unmarshal(trimmed, &s.Items)
 	}
-	return fmt.Errorf("failed to unmarshal status as single item or list: %s", string(b))
+
+	s.IsSingle = true
+	var single StatusItem
+	if err := json.Unmarshal(trimmed, &single); err != nil {
+		return err
+	}
+	s.Items = []StatusItem{single}
+	return nil
 }
 
 func (s *StatusUnion) UnmarshalYAML(value *goyaml.Node) error {
@@ -148,16 +308,16 @@ func (s *StatusUnion) UnmarshalYAML(value *goyaml.Node) error {
 	return fmt.Errorf("unexpected YAML kind for status: %v", value.Kind)
 }
 
-// Downloader interface abstracts asset fetching.
-type Downloader interface {
-	Download(ctx context.Context, repo, version, asset string) ([]byte, error)
+// Fetcher retrieves the raw bytes of an asset.
+type Fetcher interface {
+	Fetch(ctx context.Context, repo, version, asset string) ([]byte, error)
 }
 
-type HTTPDownloader struct {
+type HTTPFetcher struct {
 	Client *http.Client
 }
 
-func (d *HTTPDownloader) Download(ctx context.Context, repo, version, asset string) ([]byte, error) {
+func (d *HTTPFetcher) Fetch(ctx context.Context, repo, version, asset string) ([]byte, error) {
 	client := d.Client
 	if client == nil {
 		client = &http.Client{Timeout: 60 * time.Second}
@@ -191,7 +351,12 @@ func (d *HTTPDownloader) Download(ctx context.Context, repo, version, asset stri
 	return data, nil
 }
 
-var defaultDownloader Downloader = &HTTPDownloader{}
+func (r *API) fetcher() Fetcher {
+	if r.Fetcher != nil {
+		return r.Fetcher
+	}
+	return &HTTPFetcher{}
+}
 
 // Filter reconciles each vendored asset and outputs the generated Kubernetes resources.
 func (r *API) Filter(items []*yaml.RNode) ([]*yaml.RNode, error) {
@@ -215,22 +380,19 @@ func (r *API) Filter(items []*yaml.RNode) ([]*yaml.RNode, error) {
 
 	for _, specItem := range r.Spec.Items {
 		src := specItem.Source
-		if src.Type != "githubRelease" {
-			return nil, fmt.Errorf("unsupported source type %q: only githubRelease is supported", src.Type)
+		if src == nil {
+			return nil, fmt.Errorf("source must be specified")
 		}
-		if src.Repo == "" || !strings.Contains(src.Repo, "/") {
-			return nil, fmt.Errorf("source.repo must be specified as <owner>/<repo>, got %q", src.Repo)
-		}
-		if src.Version == "" {
-			return nil, fmt.Errorf("source.version must be specified")
-		}
-		if src.Asset == "" {
-			return nil, fmt.Errorf("source.asset must be specified")
+		if err := src.Validate(); err != nil {
+			return nil, err
 		}
 
 		dest := specItem.Destination
 		if dest == "" {
-			dest = filepath.Join("vendor", src.Asset)
+			dest = src.DefaultDestination()
+		}
+		if !filepath.IsLocal(dest) {
+			return nil, fmt.Errorf("destination %q must be a relative path inside the kustomization directory", dest)
 		}
 
 		// Check cache hit
@@ -238,7 +400,8 @@ func (r *API) Filter(items []*yaml.RNode) ([]*yaml.RNode, error) {
 		var fileContent []byte
 
 		if existingStatus, ok := statusByDest[dest]; ok {
-			if existingStatus.Source == src && existingStatus.Hash != "" {
+			sourceMatches := existingStatus.Source != nil && existingStatus.Source.Key() == src.Key()
+			if sourceMatches && existingStatus.Hash != "" {
 				if existingData, err := os.ReadFile(dest); err == nil {
 					computedHash := fmt.Sprintf("sha256:%x", sha256.Sum256(existingData))
 					if computedHash == existingStatus.Hash {
@@ -251,24 +414,19 @@ func (r *API) Filter(items []*yaml.RNode) ([]*yaml.RNode, error) {
 		}
 
 		if !cacheHit {
-			data, err := defaultDownloader.Download(ctx, src.Repo, src.Version, src.Asset)
+			hash, err := src.Download(ctx, r.fetcher(), dest)
 			if err != nil {
-				return nil, fmt.Errorf("failed to fetch asset %s@%s: %w", src.Repo, src.Version, err)
+				return nil, err
 			}
 
-			computedHash := fmt.Sprintf("sha256:%x", sha256.Sum256(data))
-
-			if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
-				return nil, fmt.Errorf("failed to create destination directory for %s: %w", dest, err)
-			}
-			if err := writeFileAtomic(dest, data, 0644); err != nil {
-				return nil, fmt.Errorf("failed to write vendored file %s: %w", dest, err)
+			fileContent, err = os.ReadFile(dest)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read vendored file %s: %w", dest, err)
 			}
 
-			fileContent = data
 			newStatus := StatusItem{
 				Destination: dest,
-				Hash:        computedHash,
+				Hash:        hash,
 				Source:      src,
 			}
 			updatedStatus = append(updatedStatus, newStatus)
@@ -289,7 +447,7 @@ func (r *API) Filter(items []*yaml.RNode) ([]*yaml.RNode, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to locate generator file for write-back: %w", err)
 		}
-		if err := updateStatusInFile(genPath, updatedStatus, r.Spec.IsSingle); err != nil {
+		if err := updateStatusInFile(genPath, updatedStatus, r); err != nil {
 			return nil, fmt.Errorf("failed to update status in %s: %w", genPath, err)
 		}
 	}
@@ -326,7 +484,7 @@ func findGeneratorFile(api *API) (string, error) {
 
 	// 2. Command line arguments in standalone mode
 	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") {
-		if matchesGenerator(os.Args[1], api.Metadata.Name) {
+		if matchesGenerator(os.Args[1], api.APIVersion, api.Metadata.Name) {
 			return os.Args[1], nil
 		}
 	}
@@ -349,7 +507,7 @@ func findGeneratorFile(api *API) (string, error) {
 					}
 				}
 				for _, p := range genPaths {
-					if matchesGenerator(p, api.Metadata.Name) {
+					if matchesGenerator(p, api.APIVersion, api.Metadata.Name) {
 						return p, nil
 					}
 				}
@@ -366,7 +524,7 @@ func findGeneratorFile(api *API) (string, error) {
 			}
 			name := e.Name()
 			if strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml") {
-				if matchesGenerator(name, api.Metadata.Name) {
+				if matchesGenerator(name, api.APIVersion, api.Metadata.Name) {
 					return name, nil
 				}
 			}
@@ -376,42 +534,74 @@ func findGeneratorFile(api *API) (string, error) {
 	return "", fmt.Errorf("could not find generator file matching name %q", api.Metadata.Name)
 }
 
-func matchesGenerator(filePath, expectedName string) bool {
+func matchesGenerator(filePath, apiVersion, expectedName string) bool {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return false
 	}
-	var doc goyaml.Node
-	if err := goyaml.Unmarshal(data, &doc); err != nil || len(doc.Content) == 0 {
+	docs, err := decodeDocuments(data)
+	if err != nil {
 		return false
 	}
-	for _, root := range doc.Content {
-		if root.Kind != goyaml.MappingNode {
-			continue
+	return findGeneratorMapping(docs, apiVersion, expectedName) != nil
+}
+
+func decodeDocuments(data []byte) ([]*goyaml.Node, error) {
+	decoder := goyaml.NewDecoder(bytes.NewReader(data))
+	var docs []*goyaml.Node
+	for {
+		var doc goyaml.Node
+		if err := decoder.Decode(&doc); err != nil {
+			if err == io.EOF {
+				return docs, nil
+			}
+			return nil, err
 		}
-		var kind string
-		var name string
-		for i := 0; i < len(root.Content); i += 2 {
-			k := root.Content[i].Value
-			v := root.Content[i+1]
-			if k == "kind" {
-				kind = v.Value
-			} else if k == "metadata" && v.Kind == goyaml.MappingNode {
-				for j := 0; j < len(v.Content); j += 2 {
-					if v.Content[j].Value == "name" {
-						name = v.Content[j+1].Value
-					}
+		docs = append(docs, &doc)
+	}
+}
+
+func findGeneratorMapping(docs []*goyaml.Node, apiVersion, name string) *goyaml.Node {
+	for _, doc := range docs {
+		for _, mapping := range doc.Content {
+			if mapping.Kind != goyaml.MappingNode {
+				continue
+			}
+			if generatorMappingMatches(mapping, apiVersion, name) {
+				return mapping
+			}
+		}
+	}
+	return nil
+}
+
+func generatorMappingMatches(mapping *goyaml.Node, apiVersion, name string) bool {
+	var foundAPIVersion, foundKind, foundName string
+	for i := 0; i < len(mapping.Content); i += 2 {
+		key := mapping.Content[i].Value
+		value := mapping.Content[i+1]
+		switch key {
+		case "apiVersion":
+			foundAPIVersion = value.Value
+		case "kind":
+			foundKind = value.Value
+		case "metadata":
+			if value.Kind != goyaml.MappingNode {
+				continue
+			}
+			for j := 0; j < len(value.Content); j += 2 {
+				if value.Content[j].Value == "name" {
+					foundName = value.Content[j+1].Value
 				}
 			}
 		}
-		if kind == "VendorKustomization" && name == expectedName {
-			return true
-		}
 	}
-	return false
+	return foundAPIVersion == apiVersion &&
+		foundKind == "VendorKustomization" &&
+		foundName == name
 }
 
-func updateStatusInFile(filePath string, statusItems []StatusItem, isSingle bool) error {
+func updateStatusInFile(filePath string, statusItems []StatusItem, api *API) error {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return err
@@ -422,38 +612,26 @@ func updateStatusInFile(filePath string, statusItems []StatusItem, isSingle bool
 		return err
 	}
 
-	var doc goyaml.Node
-	if err := goyaml.Unmarshal(data, &doc); err != nil {
+	docs, err := decodeDocuments(data)
+	if err != nil {
 		return err
 	}
-	if len(doc.Content) == 0 {
+	if len(docs) == 0 {
 		return fmt.Errorf("empty yaml document in %s", filePath)
 	}
 
-	// Find the mapping node with kind: VendorKustomization
-	var targetMapping *goyaml.Node
-	for _, n := range doc.Content {
-		if n.Kind == goyaml.MappingNode {
-			for i := 0; i < len(n.Content); i += 2 {
-				if n.Content[i].Value == "kind" && n.Content[i+1].Value == "VendorKustomization" {
-					targetMapping = n
-					break
-				}
-			}
-		}
-		if targetMapping != nil {
-			break
-		}
-	}
-
-	if targetMapping == nil && len(doc.Content) > 0 && doc.Content[0].Kind == goyaml.MappingNode {
-		targetMapping = doc.Content[0]
-	}
+	targetMapping := findGeneratorMapping(docs, api.APIVersion, api.Metadata.Name)
 	if targetMapping == nil {
-		return fmt.Errorf("no mapping node found in %s", filePath)
+		return fmt.Errorf(
+			"no VendorKustomization %q with apiVersion %q found in %s",
+			api.Metadata.Name,
+			api.APIVersion,
+			filePath,
+		)
 	}
 
 	// Detect if spec in targetMapping is single or sequence to preserve structure
+	isSingle := api.Spec.IsSingle
 	for i := 0; i < len(targetMapping.Content); i += 2 {
 		if targetMapping.Content[i].Value == "spec" {
 			switch targetMapping.Content[i+1].Kind {
@@ -495,7 +673,12 @@ func updateStatusInFile(filePath string, statusItems []StatusItem, isSingle bool
 	var buf bytes.Buffer
 	enc := goyaml.NewEncoder(&buf)
 	enc.SetIndent(2)
-	if err := enc.Encode(&doc); err != nil {
+	for _, doc := range docs {
+		if err := enc.Encode(doc); err != nil {
+			return err
+		}
+	}
+	if err := enc.Close(); err != nil {
 		return err
 	}
 

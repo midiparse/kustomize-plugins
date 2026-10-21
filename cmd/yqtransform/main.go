@@ -29,8 +29,6 @@ func main() {
 		command.StandaloneEnabled,
 		false,
 	)
-	command.AddGenerateDockerfile(cmd)
-
 	if err := cmd.Execute(); err != nil {
 		log.Fatalf("Error executing command: %v", err)
 	}
