@@ -1,0 +1,188 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "YqTransform",
+  "description": "Function configuration for the YqTransform kustomize plugin. It applies yq expressions to fields of selected resources.",
+  "type": "object",
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "additionalProperties": false,
+  "properties": {
+    "apiVersion": {
+      "const": "kustomize-plugins.midiparse.github.com/v1alpha1"
+    },
+    "kind": {
+      "const": "YqTransform"
+    },
+    "metadata": {
+      "$ref": "#/$defs/metadata"
+    },
+    "spec": {
+      "type": "object",
+      "required": ["source", "targets"],
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "type": "object",
+          "required": ["expression"],
+          "additionalProperties": false,
+          "properties": {
+            "expression": {
+              "type": "string",
+              "minLength": 1,
+              "description": "yq expression applied to each selected field."
+            },
+            "vars": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/variable"
+              }
+            }
+          }
+        },
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/target"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "metadata": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "labels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "annotations": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "variable": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceValue": {
+          "type": "string",
+          "description": "Literal YAML value for the variable."
+        },
+        "source": {
+          "$ref": "#/$defs/sourceSelector"
+        }
+      },
+      "oneOf": [
+        {
+          "required": ["sourceValue"]
+        },
+        {
+          "required": ["source"]
+        }
+      ]
+    },
+    "sourceSelector": {
+      "type": "object",
+      "description": "Selects a resource and an optional field to use as the variable value.",
+      "additionalProperties": false,
+      "properties": {
+        "group": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "fieldPath": {
+          "type": "string"
+        }
+      }
+    },
+    "selector": {
+      "type": "object",
+      "description": "Selects target resources by group, version, kind, name, namespace, labels, or annotations.",
+      "additionalProperties": false,
+      "properties": {
+        "group": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "annotationSelector": {
+          "type": "string"
+        },
+        "labelSelector": {
+          "type": "string"
+        }
+      }
+    },
+    "fieldOptions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": {
+          "type": "boolean",
+          "description": "Create the field if it does not exist."
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "required": ["select"],
+      "additionalProperties": false,
+      "properties": {
+        "select": {
+          "$ref": "#/$defs/selector"
+        },
+        "fieldPaths": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "options": {
+          "$ref": "#/$defs/fieldOptions"
+        }
+      }
+    }
+  }
+}

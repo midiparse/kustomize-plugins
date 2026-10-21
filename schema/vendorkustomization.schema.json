@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VendorKustomization",
+  "description": "Function configuration for the VendorKustomization kustomize plugin. It vendors GitHub release assets and records their SHA-256 hashes in status.",
+  "type": "object",
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "additionalProperties": false,
+  "properties": {
+    "apiVersion": {
+      "const": "kustomize-plugins.midiparse.github.com/v1alpha1"
+    },
+    "kind": {
+      "const": "VendorKustomization"
+    },
+    "metadata": {
+      "$ref": "#/$defs/metadata"
+    },
+    "spec": {
+      "description": "A single source or a list of sources to vendor.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/item"
+        },
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/item"
+          }
+        }
+      ]
+    },
+    "status": {
+      "description": "Managed by the plugin. A single status item or a list matching the shape of spec.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/statusItem"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/statusItem"
+          }
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "metadata": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "labels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "annotations": {
+          "type": "object",
+          "description": "Use config.kolobok.szakallas.eu/file-path to override how the generator file is located for status write-back.",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "required": ["type", "repo", "version", "asset"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "githubRelease"
+        },
+        "repo": {
+          "type": "string",
+          "pattern": "^[^/\\s]+/[^/\\s]+$",
+          "description": "GitHub repository in <owner>/<repo> form."
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Release tag to download."
+        },
+        "asset": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Release asset filename."
+        }
+      }
+    },
+    "item": {
+      "type": "object",
+      "required": ["source"],
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/source"
+        },
+        "destination": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Destination path relative to the kustomization directory. Defaults to vendor/<asset>."
+        }
+      }
+    },
+    "statusItem": {
+      "type": "object",
+      "required": ["destination", "hash", "source"],
+      "additionalProperties": false,
+      "properties": {
+        "destination": {
+          "type": "string",
+          "minLength": 1
+        },
+        "hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "source": {
+          "$ref": "#/$defs/source"
+        }
+      }
+    }
+  }
+}

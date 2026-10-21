@@ -78,6 +78,7 @@ jobs:
       matrix:
         plugin:
           - resourceinjector
+          - vendorkustomization
           - yqtransform
     steps:
       - uses: actions/checkout@v5
