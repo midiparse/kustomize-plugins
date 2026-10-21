@@ -14,6 +14,7 @@ import (
 )
 
 func TestE2E(t *testing.T, path string) {
+	t.Helper()
 	testDirs, err := os.ReadDir(path)
 	require.NoError(t, err)
 

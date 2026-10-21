@@ -10,6 +10,7 @@ import (
 	"github.com/midiparse/kustomize-plugins/internal/transform"
 	"github.com/mikefarah/yq/v4/pkg/yqlib"
 	goyaml "go.yaml.in/yaml/v3"
+	yamlv4 "go.yaml.in/yaml/v4"
 	logging "gopkg.in/op/go-logging.v1"
 	"sigs.k8s.io/kustomize/kyaml/fn/framework"
 	"sigs.k8s.io/kustomize/kyaml/fn/framework/command"
@@ -28,8 +29,6 @@ func main() {
 		command.StandaloneEnabled,
 		false,
 	)
-	command.AddGenerateDockerfile(cmd)
-
 	if err := cmd.Execute(); err != nil {
 		log.Fatalf("Error executing command: %v", err)
 	}
@@ -150,7 +149,63 @@ func sourceValueToNode(value string) (*goyaml.Node, error) {
 	return docNode, nil
 }
 
-func toCandidateNode(node *goyaml.Node) (*yqlib.CandidateNode, error) {
+func v3ToV4(n *goyaml.Node) *yamlv4.Node {
+	if n == nil {
+		return nil
+	}
+	out := &yamlv4.Node{
+		Kind:        yamlv4.Kind(n.Kind),
+		Style:       yamlv4.Style(n.Style),
+		Tag:         n.Tag,
+		Value:       n.Value,
+		Anchor:      n.Anchor,
+		HeadComment: n.HeadComment,
+		LineComment: n.LineComment,
+		FootComment: n.FootComment,
+		Line:        n.Line,
+		Column:      n.Column,
+	}
+	if n.Alias != nil {
+		out.Alias = v3ToV4(n.Alias)
+	}
+	if len(n.Content) > 0 {
+		out.Content = make([]*yamlv4.Node, len(n.Content))
+		for i, c := range n.Content {
+			out.Content[i] = v3ToV4(c)
+		}
+	}
+	return out
+}
+
+func v4ToV3(n *yamlv4.Node) *goyaml.Node {
+	if n == nil {
+		return nil
+	}
+	out := &goyaml.Node{
+		Kind:        goyaml.Kind(n.Kind),
+		Style:       goyaml.Style(n.Style),
+		Tag:         n.Tag,
+		Value:       n.Value,
+		Anchor:      n.Anchor,
+		HeadComment: n.HeadComment,
+		LineComment: n.LineComment,
+		FootComment: n.FootComment,
+		Line:        n.Line,
+		Column:      n.Column,
+	}
+	if n.Alias != nil {
+		out.Alias = v4ToV3(n.Alias)
+	}
+	if len(n.Content) > 0 {
+		out.Content = make([]*goyaml.Node, len(n.Content))
+		for i, c := range n.Content {
+			out.Content[i] = v4ToV3(c)
+		}
+	}
+	return out
+}
+
+func toCandidateNode(node *yamlv4.Node) (*yqlib.CandidateNode, error) {
 	var res yqlib.CandidateNode
 	if err := res.UnmarshalYAML(node, nil); err != nil {
 		return nil, err
@@ -172,7 +227,7 @@ func (s *yqTransform) CreateKind() yaml.Kind {
 func (s *yqTransform) Apply(target *yaml.RNode) error {
 	expr, node := wrapInVariableContext(s.Expression, target.YNode(), s.Variables)
 
-	inputNode, err := toCandidateNode(node)
+	inputNode, err := toCandidateNode(v3ToV4(node))
 	if err != nil {
 		return fmt.Errorf("failed to create input node for expression: %w", err)
 	}
@@ -204,7 +259,7 @@ func (s *yqTransform) Apply(target *yaml.RNode) error {
 	}
 
 	// Replace the target node's content with the transformed content
-	target.SetYNode(outNode)
+	target.SetYNode(v4ToV3(outNode))
 
 	return nil
 }
@@ -248,7 +303,7 @@ func wrapInVariableContext(expression string, node *goyaml.Node, vars map[string
 	// Wrap the user expression
 	var wrappedExpression strings.Builder
 	for varName := range vars {
-		wrappedExpression.WriteString(fmt.Sprintf(".vars.%s as $%s | ", varName, varName))
+		fmt.Fprintf(&wrappedExpression, ".vars.%s as $%s | ", varName, varName)
 	}
 
 	finalExpression := fmt.Sprintf(".target | %s", expression)

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "kustomize-plugins function configuration",
+  "description": "Aggregate schema for all kustomize-plugins function configurations. Matches exactly one plugin resource.",
+  "oneOf": [
+    {
+      "$ref": "resourceinjector.schema.json"
+    },
+    {
+      "$ref": "yqtransform.schema.json"
+    },
+    {
+      "$ref": "vendorkustomization.schema.json"
+    }
+  ]
+}

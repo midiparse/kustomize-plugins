@@ -13,6 +13,7 @@ buildGoModule rec {
 
   src = ./.;
 
+  allowGoReference = true;
   env.CGO_ENABLED = "0";
 
   ldflags = [
@@ -22,6 +23,7 @@ buildGoModule rec {
 
   subPackages = [
     "cmd/resourceinjector"
+    "cmd/vendorkustomization"
     "cmd/yqtransform"
   ];
 
@@ -37,6 +39,9 @@ buildGoModule rec {
         mv "$f" "$out/bin/kustomize-plugin-$base"
       done
     fi
+
+    install -d "$out/share/kustomize-plugins/schema"
+    install -m644 schema/*.json "$out/share/kustomize-plugins/schema/"
   '';
 
   meta = {

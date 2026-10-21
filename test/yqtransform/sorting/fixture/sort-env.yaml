@@ -10,8 +10,8 @@ spec:
   source:
     expression: "sort_by(.name)"
   targets:
-  - select:
-      kind: Deployment
-    fieldPaths:
-    - spec.template.spec.containers.*.env
-    - spec.template.spec.initContainers.*.env
+    - select:
+        kind: Deployment
+      fieldPaths:
+        - spec.template.spec.containers.*.env
+        - spec.template.spec.initContainers.*.env
