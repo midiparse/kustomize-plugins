@@ -78,13 +78,10 @@
           };
         };
       }
-      // (lib.genAttrs
-        (builtins.filter (h: h != "antigravity") inputs.bikeshed.lib.agents.popularHarnesses)
-        (_: {
-          enable = true;
-          linkSkills = true;
-        })
-      );
+      // (lib.genAttrs inputs.bikeshed.lib.agents.popularHarnesses (_: {
+        enable = true;
+        linkSkills = true;
+      }));
     };
 
     outputs =

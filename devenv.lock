@@ -9,11 +9,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1792509150,
-        "narHash": "sha256-hQydapNFv2mfkX5gp+XRC+zdNABIkPrPcc3gpgvvgUQ=",
+        "lastModified": 1792952803,
+        "narHash": "sha256-JpUT29d3QZHE6jszydijS/23/P1LSYZ+HAo3RKjkP9g=",
         "owner": "dszakallas",
         "repo": "bikeshed",
-        "rev": "b0265b9572db86d508538d46601ec0419c181d91",
+        "rev": "70ad5ccd0f78efaca563385988f4d7978f316a1f",
         "type": "github"
       },
       "original": {
