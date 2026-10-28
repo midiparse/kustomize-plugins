@@ -20,6 +20,14 @@
   };
 
   config = {
+    packages = [
+      pkgs.nix-update
+    ];
+
+    scripts.update-vendor-hash.exec = ''
+      exec nix-update --flake --version=skip kustomize-plugins "$@"
+    '';
+
     enterShell = ''
       export PATH="$DEVENV_ROOT/bin:$PATH"
       go version
@@ -51,6 +59,14 @@
           "yaml"
         ];
         excludes = [ "^test/.*/out\\.yaml$" ];
+      };
+
+      update-vendor-hash = {
+        enable = true;
+        name = "update-vendor-hash";
+        entry = "${pkgs.nix-update}/bin/nix-update --flake --version=skip kustomize-plugins";
+        files = "go\\.(mod|sum)$";
+        pass_filenames = false;
       };
     };
 
@@ -86,32 +102,13 @@
 
     outputs =
       let
-        params = {
-          vendorHash = "sha256-n+lKbSCktXNgqTLSG++AWdItai7jDFGSAJTQs5hC23w=";
-          version = config.version;
+        flake = (import ./flake.nix).outputs {
+          self = { };
+          inherit (inputs) nixpkgs flake-utils;
         };
       in
-      inputs.flake-utils.lib.eachDefaultSystem (
-        system:
-        let
-          stdenv = (
-            pkgs.stdenv
-            // {
-              hostPlatform = pkgs.lib.systems.elaborate system;
-            }
-          );
-          buildGoModule = pkgs.buildGoModule.override { inherit stdenv; };
-        in
-        {
-          default = (
-            (pkgs.callPackage ./pkg.nix (params // { inherit buildGoModule; })).overrideAttrs (old: {
-              env = stdenv.hostPlatform.go // {
-                CGO_ENABLED = "0";
-              };
-              doCheck = false;
-            })
-          );
-        }
-      );
+      inputs.flake-utils.lib.eachSystem (builtins.attrNames flake.packages) (system: {
+        default = flake.packages.${system}.default;
+      });
   };
 }

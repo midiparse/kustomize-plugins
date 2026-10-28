@@ -15,7 +15,6 @@ jobs:
         platform:
           - x86_64-linux
           - aarch64-linux
-          - x86_64-darwin
           - aarch64-darwin
     steps:
       - uses: actions/checkout@v5
