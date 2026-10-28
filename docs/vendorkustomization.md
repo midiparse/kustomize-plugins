@@ -1,8 +1,8 @@
 # VendorKustomization
 
-The `VendorKustomization` is a Kustomize generator that vendors third-party Kubernetes manifests from GitHub releases
-and emits them into the build. It records the source and a hash of each downloaded asset in a `status` field,
-so subsequent builds can reuse the vendored file without hitting the network.
+The `VendorKustomization` is a Kustomize generator that vendors third-party Kubernetes manifests from GitHub
+releases or generic HTTP URLs and emits them into the build. It records the source and a hash of each downloaded
+asset in a `status` field, so subsequent builds can reuse the vendored file without hitting the network.
 
 JSON Schema: [`schema/vendorkustomization.schema.json`](../schema/vendorkustomization.schema.json)
 
@@ -10,16 +10,16 @@ JSON Schema: [`schema/vendorkustomization.schema.json`](../schema/vendorkustomiz
 
 The plugin operates as a Kustomize exec generator. For each entry in `spec` it:
 
-1. Resolves the destination path, either from `destination` or as `vendor/<asset>`.
+1. Resolves the destination path, either from `destination`, as `vendor/<asset>` for `githubRelease`, or as
+   `vendor/<filename>` derived from the URL for `http`.
 2. Looks for a matching entry in `status` for that destination.
 3. Treats the item as a cache hit when:
    - the file exists at the destination,
    - the `status` entry records the same `source`, and
    - the file's hash matches the recorded `hash`.
 4. On a cache hit, reads the vendored file from disk and performs no network requests.
-5. On a cache miss, downloads
-   `https://github.com/<repo>/releases/download/<version>/<asset>`, hashes it, writes it to the destination, and
-   records the new `status` entry in the generator file.
+5. On a cache miss, downloads the resource, hashes it, writes it to the destination, and records the new `status`
+   entry in the generator file.
 6. Parses the vendored file and appends its resources to the build output.
 
 Downloads are written to a temporary file and renamed into place, so an interrupted build does not leave a partial
@@ -64,18 +64,42 @@ status:
       asset: sandbox-with-extensions.yaml
 ```
 
+For generic HTTP resources:
+
+```yaml
+apiVersion: kustomize-plugins.midiparse.github.com/v1alpha1
+kind: VendorKustomization
+metadata:
+  name: http-manifest
+  annotations:
+    config.kubernetes.io/function: |
+      exec:
+        path: kustomize-plugin-vendorkustomization
+spec:
+  source:
+    type: http
+    url: https://example.com/manifests/app.yaml
+status:
+  destination: vendor/app.yaml
+  hash: sha256:15b26ee850239a086b5d363f57454b4730e5387113f571833d0339cef95b0266
+  source:
+    type: http
+    url: https://example.com/manifests/app.yaml
+```
+
 `spec` accepts either a single item or a list of items. When a list is used, `status` is written back as a list as
 well; a single item is written back as a single mapping.
 
 ## Fields
 
 - `spec`: A single item or a list of items.
-- `spec[].source.type`: The source type. Only `githubRelease` is supported.
-- `spec[].source.repo`: The GitHub repository in `<owner>/<repo>` form.
-- `spec[].source.version`: The release tag to download.
-- `spec[].source.asset`: The release asset filename.
+- `spec[].source.type`: The source type. Either `githubRelease` or `http`.
+- `spec[].source.repo`: (When type is `githubRelease`) The GitHub repository in `<owner>/<repo>` form.
+- `spec[].source.version`: (When type is `githubRelease`) The release tag to download.
+- `spec[].source.asset`: (When type is `githubRelease`) The release asset filename.
+- `spec[].source.url`: (When type is `http`) The generic HTTP or HTTPS URL to fetch the resource from.
 - `spec[].destination`: (Optional) Where to write the asset, relative to the directory containing `kustomization.yaml`.
-  Defaults to `vendor/<asset>`.
+  Defaults to `vendor/<asset>` for `githubRelease` or `vendor/<filename>` derived from the URL path for `http`.
 - `status[].destination`: The path that was written.
 - `status[].hash`: The SHA-256 of the vendored file, in `sha256:<hex>` form.
 - `status[].source`: A copy of the `source` that produced the file.

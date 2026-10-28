@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "VendorKustomization",
-  "description": "Function configuration for the VendorKustomization kustomize plugin. It vendors GitHub release assets and records their SHA-256 hashes in status.",
+  "description": "Function configuration for the VendorKustomization kustomize plugin. It vendors GitHub release assets and generic HTTP resources and records their SHA-256 hashes in status.",
   "type": "object",
   "required": ["apiVersion", "kind", "metadata", "spec"],
   "additionalProperties": false,
@@ -74,6 +74,17 @@
       }
     },
     "source": {
+      "description": "Asset source configuration.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/githubReleaseSource"
+        },
+        {
+          "$ref": "#/$defs/httpSource"
+        }
+      ]
+    },
+    "githubReleaseSource": {
       "type": "object",
       "required": ["type", "repo", "version", "asset"],
       "additionalProperties": false,
@@ -98,6 +109,22 @@
         }
       }
     },
+    "httpSource": {
+      "type": "object",
+      "required": ["type", "url"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "http"
+        },
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https?://",
+          "description": "Generic HTTP or HTTPS URL of the resource."
+        }
+      }
+    },
     "item": {
       "type": "object",
       "required": ["source"],
@@ -109,7 +136,7 @@
         "destination": {
           "type": "string",
           "minLength": 1,
-          "description": "Destination path relative to the kustomization directory. Defaults to vendor/<asset>."
+          "description": "Destination path relative to the kustomization directory. Defaults to vendor/<asset> for githubRelease or vendor/<filename> for http."
         }
       }
     },
