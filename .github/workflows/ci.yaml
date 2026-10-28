@@ -1,13 +1,26 @@
+name: Run CI checks
+
 on: # yamllint disable-line rule:truthy
-  push:
+  pull_request:
+    types: [opened, synchronize, labeled]
     branches:
       - "**"
+  push:
+    branches:
+      - main
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.WORKFLOW_TOKEN || github.token }}
       - uses: cachix/install-nix-action@v31
         with:
           install_url: https://releases.nixos.org/nix/nix-2.34.8/install
@@ -15,4 +28,20 @@ jobs:
         with:
           name: devenv
       - run: nix profile add nixpkgs#devenv
-      - run: devenv test --override-dotfile
+      - run: devenv test --dont-override-dotfile
+      - name: Apply autofixes
+        if: |
+          failure() &&
+          contains(github.event.pull_request.labels.*.name, 'autofix')
+        shell: devenv shell bash -- -e {0}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: apply autofixes"
+            FIX_COMMIT_SHA=$(git rev-parse HEAD)
+            git checkout ${{ github.head_ref }}
+            git cherry-pick ${FIX_COMMIT_SHA}
+            git push origin ${{ github.head_ref }}
+          fi
