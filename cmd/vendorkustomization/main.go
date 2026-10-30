@@ -9,7 +9,9 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -103,7 +105,65 @@ func (s *GithubReleaseSource) Download(ctx context.Context, fetcher Fetcher, des
 	if err != nil {
 		return "", fmt.Errorf("failed to fetch asset %s@%s: %w", s.Repo, s.Version, err)
 	}
+	return saveVendoredFile(dest, data)
+}
 
+// HTTPSource downloads a resource from a generic HTTP or HTTPS URL.
+type HTTPSource struct {
+	Type string `json:"type" yaml:"type"`
+	URL  string `json:"url" yaml:"url"`
+}
+
+func (s *HTTPSource) SourceType() string {
+	return "http"
+}
+
+func (s *HTTPSource) Validate() error {
+	if s.Type != "http" {
+		return fmt.Errorf("unsupported source type %q: only http is supported", s.Type)
+	}
+	if s.URL == "" {
+		return fmt.Errorf("source.url must be specified")
+	}
+	parsed, err := url.Parse(s.URL)
+	if err != nil {
+		return fmt.Errorf("source.url %q is invalid: %w", s.URL, err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("source.url scheme must be http or https, got %q", parsed.Scheme)
+	}
+	if parsed.Host == "" {
+		return fmt.Errorf("source.url %q must include a host", s.URL)
+	}
+	return nil
+}
+
+func (s *HTTPSource) DefaultDestination() string {
+	parsed, err := url.Parse(s.URL)
+	if err != nil {
+		return ""
+	}
+	clean := path.Clean(parsed.Path)
+	base := path.Base(clean)
+	if base == "" || base == "." || base == "/" || base == ".." {
+		return ""
+	}
+	return filepath.Join("vendor", base)
+}
+
+func (s *HTTPSource) Key() string {
+	return strings.Join([]string{s.SourceType(), s.URL}, "\x00")
+}
+
+func (s *HTTPSource) Download(ctx context.Context, fetcher Fetcher, dest string) (string, error) {
+	data, err := fetcher.FetchURL(ctx, s.URL)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch from %s: %w", s.URL, err)
+	}
+	return saveVendoredFile(dest, data)
+}
+
+func saveVendoredFile(dest string, data []byte) (string, error) {
 	hash := fmt.Sprintf("sha256:%x", sha256.Sum256(data))
 
 	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
@@ -118,9 +178,10 @@ func (s *GithubReleaseSource) Download(ctx context.Context, fetcher Fetcher, des
 
 type sourceConfig struct {
 	Type    string `json:"type" yaml:"type"`
-	Repo    string `json:"repo" yaml:"repo"`
-	Version string `json:"version" yaml:"version"`
-	Asset   string `json:"asset" yaml:"asset"`
+	Repo    string `json:"repo,omitempty" yaml:"repo,omitempty"`
+	Version string `json:"version,omitempty" yaml:"version,omitempty"`
+	Asset   string `json:"asset,omitempty" yaml:"asset,omitempty"`
+	URL     string `json:"url,omitempty" yaml:"url,omitempty"`
 }
 
 func (c sourceConfig) source() (Source, error) {
@@ -135,8 +196,13 @@ func (c sourceConfig) source() (Source, error) {
 			Version: c.Version,
 			Asset:   c.Asset,
 		}, nil
+	case "http":
+		return &HTTPSource{
+			Type: c.Type,
+			URL:  c.URL,
+		}, nil
 	default:
-		return nil, fmt.Errorf("unsupported source type %q: only githubRelease is supported", c.Type)
+		return nil, fmt.Errorf("unsupported source type %q: only githubRelease and http are supported", c.Type)
 	}
 }
 
@@ -311,6 +377,7 @@ func (s *StatusUnion) UnmarshalYAML(value *goyaml.Node) error {
 // Fetcher retrieves the raw bytes of an asset.
 type Fetcher interface {
 	Fetch(ctx context.Context, repo, version, asset string) ([]byte, error)
+	FetchURL(ctx context.Context, url string) ([]byte, error)
 }
 
 type HTTPFetcher struct {
@@ -318,34 +385,37 @@ type HTTPFetcher struct {
 }
 
 func (d *HTTPFetcher) Fetch(ctx context.Context, repo, version, asset string) ([]byte, error) {
+	url := fmt.Sprintf("https://github.com/%s/releases/download/%s/%s", repo, version, asset)
+	if baseURL := os.Getenv("GITHUB_BASE_URL"); baseURL != "" {
+		url = fmt.Sprintf("%s/%s/releases/download/%s/%s", strings.TrimRight(baseURL, "/"), repo, version, asset)
+	}
+	return d.FetchURL(ctx, url)
+}
+
+func (d *HTTPFetcher) FetchURL(ctx context.Context, rawURL string) ([]byte, error) {
 	client := d.Client
 	if client == nil {
 		client = &http.Client{Timeout: 60 * time.Second}
 	}
 
-	url := fmt.Sprintf("https://github.com/%s/releases/download/%s/%s", repo, version, asset)
-	if baseURL := os.Getenv("GITHUB_BASE_URL"); baseURL != "" {
-		url = fmt.Sprintf("%s/%s/releases/download/%s/%s", strings.TrimRight(baseURL, "/"), repo, version, asset)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request for %s: %w", url, err)
+		return nil, fmt.Errorf("failed to create request for %s: %w", rawURL, err)
 	}
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to download %s: %w", url, err)
+		return nil, fmt.Errorf("failed to download %s: %w", rawURL, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("download from %s returned status %d %s", url, resp.StatusCode, resp.Status)
+		return nil, fmt.Errorf("download from %s returned status %d %s", rawURL, resp.StatusCode, resp.Status)
 	}
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response body from %s: %w", url, err)
+		return nil, fmt.Errorf("failed to read response body from %s: %w", rawURL, err)
 	}
 
 	return data, nil

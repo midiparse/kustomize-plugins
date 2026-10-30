@@ -27,6 +27,11 @@ func (m *mockFetcher) Fetch(ctx context.Context, repo, version, asset string) ([
 	return m.data, m.err
 }
 
+func (m *mockFetcher) FetchURL(ctx context.Context, url string) ([]byte, error) {
+	m.called = true
+	return m.data, m.err
+}
+
 func TestCacheHitWithoutNetwork(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
@@ -388,6 +393,13 @@ func (m *mockMultiFetcher) Fetch(ctx context.Context, repo, version, asset strin
 	return nil, fmt.Errorf("not found: %s", key)
 }
 
+func (m *mockMultiFetcher) FetchURL(ctx context.Context, rawURL string) ([]byte, error) {
+	if data, ok := m.responses[rawURL]; ok {
+		return data, nil
+	}
+	return nil, fmt.Errorf("not found: %s", rawURL)
+}
+
 func TestHTTPFetcherLiveServer(t *testing.T) {
 	manifest := "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: test-ns\n"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -557,6 +569,88 @@ func TestValidationErrors(t *testing.T) {
 			},
 			want: "must be a relative path",
 		},
+		{
+			name: "http unsupported source type",
+			mutate: func(api *API) {
+				api.Spec.Items[0].Source = &HTTPSource{
+					Type: "notHttp",
+					URL:  "https://example.com/res.yaml",
+				}
+			},
+			want: "unsupported source type",
+		},
+		{
+			name: "http missing url",
+			mutate: func(api *API) {
+				api.Spec.Items[0].Source = &HTTPSource{
+					Type: "http",
+					URL:  "",
+				}
+			},
+			want: "source.url must be specified",
+		},
+		{
+			name: "http invalid url scheme",
+			mutate: func(api *API) {
+				api.Spec.Items[0].Source = &HTTPSource{
+					Type: "http",
+					URL:  "ftp://example.com/res.yaml",
+				}
+			},
+			want: "source.url scheme must be http or https",
+		},
+		{
+			name: "http missing host",
+			mutate: func(api *API) {
+				api.Spec.Items[0].Source = &HTTPSource{
+					Type: "http",
+					URL:  "http:///res.yaml",
+				}
+			},
+			want: "must include a host",
+		},
+		{
+			name: "http default destination cannot be determined",
+			mutate: func(api *API) {
+				api.Spec.Items[0].Source = &HTTPSource{
+					Type: "http",
+					URL:  "http://example.com/",
+				}
+			},
+			want: "must be a relative path",
+		},
+		{
+			name: "http default destination escapes project",
+			mutate: func(api *API) {
+				api.Spec.Items[0].Source = &HTTPSource{
+					Type: "http",
+					URL:  "http://example.com/..",
+				}
+			},
+			want: "must be a relative path",
+		},
+		{
+			name: "http absolute destination",
+			mutate: func(api *API) {
+				api.Spec.Items[0].Source = &HTTPSource{
+					Type: "http",
+					URL:  "https://example.com/res.yaml",
+				}
+				api.Spec.Items[0].Destination = "/tmp/res.yaml"
+			},
+			want: "must be a relative path",
+		},
+		{
+			name: "http destination escapes project",
+			mutate: func(api *API) {
+				api.Spec.Items[0].Source = &HTTPSource{
+					Type: "http",
+					URL:  "https://example.com/res.yaml",
+				}
+				api.Spec.Items[0].Destination = "../res.yaml"
+			},
+			want: "must be a relative path",
+		},
 	}
 
 	for _, tt := range tests {
@@ -571,4 +665,193 @@ func TestValidationErrors(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.want)
 		})
 	}
+}
+
+func TestHTTPCacheHitWithoutNetwork(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	manifestContent := `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cached-http-cm
+data:
+  key: cached-val
+`
+	vendorPath := filepath.Join("vendor", "resource.yaml")
+	require.NoError(t, os.MkdirAll(filepath.Dir(vendorPath), 0755))
+	require.NoError(t, os.WriteFile(vendorPath, []byte(manifestContent), 0644))
+
+	hash := fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(manifestContent)))
+
+	genContent := fmt.Sprintf(`apiVersion: kustomize-plugins.midiparse.github.com/v1alpha1
+kind: VendorKustomization
+metadata:
+  name: test-http-cache-hit
+spec:
+  source:
+    type: http
+    url: https://example.com/path/to/resource.yaml
+status:
+  destination: %s
+  hash: %s
+  source:
+    type: http
+    url: https://example.com/path/to/resource.yaml
+`, vendorPath, hash)
+	genPath := filepath.Join(tmpDir, "generator.yaml")
+	require.NoError(t, os.WriteFile(genPath, []byte(genContent), 0644))
+
+	mock := &mockFetcher{}
+
+	api := &API{
+		APIVersion: "kustomize-plugins.midiparse.github.com/v1alpha1",
+		Metadata:   Metadata{Name: "test-http-cache-hit"},
+		Fetcher:    mock,
+		Spec: SpecUnion{
+			IsSingle: true,
+			Items: []SpecItem{
+				{
+					Source: &HTTPSource{
+						Type: "http",
+						URL:  "https://example.com/path/to/resource.yaml",
+					},
+					Destination: vendorPath,
+				},
+			},
+		},
+		Status: StatusUnion{
+			IsSingle: true,
+			Items: []StatusItem{
+				{
+					Destination: vendorPath,
+					Hash:        hash,
+					Source: &HTTPSource{
+						Type: "http",
+						URL:  "https://example.com/path/to/resource.yaml",
+					},
+				},
+			},
+		},
+	}
+
+	nodes, err := api.Filter(nil)
+	require.NoError(t, err)
+	assert.False(t, mock.called, "fetcher should NOT be called on cache hit")
+	require.Len(t, nodes, 1)
+	assert.Equal(t, "ConfigMap", nodes[0].GetKind())
+	assert.Equal(t, "cached-http-cm", nodes[0].GetName())
+
+	afterContent, err := os.ReadFile(genPath)
+	require.NoError(t, err)
+	assert.Equal(t, genContent, string(afterContent))
+}
+
+func TestHTTPCacheMissDownloadAndStatusWriteBack(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	genContent := `apiVersion: kustomize-plugins.midiparse.github.com/v1alpha1
+kind: VendorKustomization
+metadata:
+  name: http-resource
+  annotations:
+    config.kubernetes.io/function: |
+      exec:
+        path: kustomize-plugin-vendorkustomization
+spec:
+  source:
+    type: http
+    url: https://example.com/manifests/app-deployment.yaml
+`
+	genPath := filepath.Join(tmpDir, "http-resource.yaml")
+	require.NoError(t, os.WriteFile(genPath, []byte(genContent), 0644))
+
+	kustContent := `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+generators:
+  - http-resource.yaml
+`
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "kustomization.yaml"), []byte(kustContent), 0644))
+
+	downloadedYaml := `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: http-app
+spec:
+  replicas: 2
+`
+	mock := &mockFetcher{data: []byte(downloadedYaml)}
+
+	api := &API{
+		APIVersion: "kustomize-plugins.midiparse.github.com/v1alpha1",
+		Metadata:   Metadata{Name: "http-resource"},
+		Fetcher:    mock,
+		Spec: SpecUnion{
+			IsSingle: true,
+			Items: []SpecItem{
+				{
+					Source: &HTTPSource{
+						Type: "http",
+						URL:  "https://example.com/manifests/app-deployment.yaml",
+					},
+				},
+			},
+		},
+	}
+
+	nodes, err := api.Filter(nil)
+	require.NoError(t, err)
+	assert.True(t, mock.called, "fetcher should have been called on cache miss")
+	require.Len(t, nodes, 1)
+	assert.Equal(t, "Deployment", nodes[0].GetKind())
+
+	expectedDest := filepath.Join("vendor", "app-deployment.yaml")
+	writtenBytes, err := os.ReadFile(expectedDest)
+	require.NoError(t, err)
+	assert.Equal(t, downloadedYaml, string(writtenBytes))
+
+	updatedGenBytes, err := os.ReadFile(genPath)
+	require.NoError(t, err)
+	updatedGenStr := string(updatedGenBytes)
+
+	assert.Contains(t, updatedGenStr, "status:")
+	assert.Contains(t, updatedGenStr, "destination: vendor/app-deployment.yaml")
+	assert.Contains(t, updatedGenStr, "type: http")
+	assert.Contains(t, updatedGenStr, "url: https://example.com/manifests/app-deployment.yaml")
+	expectedHash := fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(downloadedYaml)))
+	assert.Contains(t, updatedGenStr, expectedHash)
+
+	// Second run: should be cache hit
+	mock.called = false
+	var updatedAPI API
+	require.NoError(t, yaml.Unmarshal(updatedGenBytes, &updatedAPI))
+	updatedAPI.Fetcher = mock
+	nodes2, err := updatedAPI.Filter(nil)
+	require.NoError(t, err)
+	assert.False(t, mock.called, "second run should be cache hit")
+	require.Len(t, nodes2, 1)
+}
+
+func TestHTTPFetcherFetchURL(t *testing.T) {
+	manifest := "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: http-ns\n"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/raw/namespace.yaml" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(manifest))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	dl := &HTTPFetcher{}
+	data, err := dl.FetchURL(context.Background(), server.URL+"/raw/namespace.yaml")
+	require.NoError(t, err)
+	assert.Equal(t, manifest, string(data))
+
+	// Test 404
+	_, err = dl.FetchURL(context.Background(), server.URL+"/raw/notfound.yaml")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "404")
 }
