@@ -7,12 +7,6 @@ metadata:
       exec:
         path: kustomize-plugin-vendorkustomization
 spec:
-  source:
-    type: http
-    url: https://example.com/resources/http-resource.yaml
-status:
-  destination: vendor/http-resource.yaml
-  hash: sha256:15b26ee850239a086b5d363f57454b4730e5387113f571833d0339cef95b0266
-  source:
-    type: http
-    url: https://example.com/resources/http-resource.yaml
+  - source:
+      type: http
+      url: https://example.com/resources/http-resource.yaml

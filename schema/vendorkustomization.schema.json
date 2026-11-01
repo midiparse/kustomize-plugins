@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "VendorKustomization",
-  "description": "Function configuration for the VendorKustomization kustomize plugin. It vendors GitHub release assets and generic HTTP resources and records their SHA-256 hashes in status.",
+  "description": "Function configuration for the VendorKustomization kustomize plugin. It vendors GitHub release assets and generic HTTP resources and records their SHA-256 hashes in a lock file.",
   "type": "object",
   "required": ["apiVersion", "kind", "metadata", "spec"],
   "additionalProperties": false,
@@ -16,33 +16,12 @@
       "$ref": "#/$defs/metadata"
     },
     "spec": {
-      "description": "A single source or a list of sources to vendor.",
-      "oneOf": [
-        {
-          "$ref": "#/$defs/item"
-        },
-        {
-          "type": "array",
-          "minItems": 1,
-          "items": {
-            "$ref": "#/$defs/item"
-          }
-        }
-      ]
-    },
-    "status": {
-      "description": "Managed by the plugin. A single status item or a list matching the shape of spec.",
-      "oneOf": [
-        {
-          "$ref": "#/$defs/statusItem"
-        },
-        {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/statusItem"
-          }
-        }
-      ]
+      "description": "A list of sources to vendor.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/item"
+      }
     }
   },
   "$defs": {
@@ -66,7 +45,6 @@
         },
         "annotations": {
           "type": "object",
-          "description": "Use config.kolobok.szakallas.eu/file-path to override how the generator file is located for status write-back.",
           "additionalProperties": {
             "type": "string"
           }
@@ -136,25 +114,7 @@
         "destination": {
           "type": "string",
           "minLength": 1,
-          "description": "Destination path relative to the kustomization directory. Defaults to vendor/<asset> for githubRelease or vendor/<filename> for http."
-        }
-      }
-    },
-    "statusItem": {
-      "type": "object",
-      "required": ["destination", "hash", "source"],
-      "additionalProperties": false,
-      "properties": {
-        "destination": {
-          "type": "string",
-          "minLength": 1
-        },
-        "hash": {
-          "type": "string",
-          "pattern": "^sha256:[0-9a-f]{64}$"
-        },
-        "source": {
-          "$ref": "#/$defs/source"
+          "description": "Destination path relative to vendor/<metadata.name>. Defaults to the asset name for githubRelease or URL filename for http."
         }
       }
     }

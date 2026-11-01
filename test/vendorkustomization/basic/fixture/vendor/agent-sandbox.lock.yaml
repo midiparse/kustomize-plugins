@@ -1,0 +1,7 @@
+  - destination: vendor/agent-sandbox/sandbox-with-extensions.yaml
+    hash: sha256:917727e6592a27b50fdd5d740eab3689654b3b19764dccf48115536badeb4f23
+    source:
+      type: githubRelease
+      repo: kubernetes-sigs/agent-sandbox
+      version: v1.0.7
+      asset: sandbox-with-extensions.yaml

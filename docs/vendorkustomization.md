@@ -2,7 +2,7 @@
 
 The `VendorKustomization` is a Kustomize generator that vendors third-party Kubernetes manifests from GitHub
 releases or generic HTTP URLs and emits them into the build. It records the source and a hash of each downloaded
-asset in a `status` field, so subsequent builds can reuse the vendored file without hitting the network.
+asset in a lock file, so subsequent builds can reuse the vendored file without hitting the network.
 
 JSON Schema: [`schema/vendorkustomization.schema.json`](../schema/vendorkustomization.schema.json)
 
@@ -10,16 +10,15 @@ JSON Schema: [`schema/vendorkustomization.schema.json`](../schema/vendorkustomiz
 
 The plugin operates as a Kustomize exec generator. For each entry in `spec` it:
 
-1. Resolves the destination path, either from `destination`, as `vendor/<asset>` for `githubRelease`, or as
-   `vendor/<filename>` derived from the URL for `http`.
-2. Looks for a matching entry in `status` for that destination.
+1. Resolves the destination path, either from `destination`, as `vendor/<metadata.name>/<asset>` for `githubRelease`, or as
+   `vendor/<metadata.name>/<filename>` derived from the URL for `http`.
+2. Looks for a matching entry in the lock file for that destination.
 3. Treats the item as a cache hit when:
    - the file exists at the destination,
-   - the `status` entry records the same `source`, and
+   - the lock entry records the same `source`, and
    - the file's hash matches the recorded `hash`.
 4. On a cache hit, reads the vendored file from disk and performs no network requests.
-5. On a cache miss, downloads the resource, hashes it, writes it to the destination, and records the new `status`
-   entry in the generator file.
+5. On a cache miss, downloads the resource, hashes it, writes it to the destination, and records it in the lock file.
 6. Parses the vendored file and appends its resources to the build output.
 
 Downloads are written to a temporary file and renamed into place, so an interrupted build does not leave a partial
@@ -37,7 +36,20 @@ generators:
   - agent-sandbox.yaml
 ```
 
-The generator resource describes one or more assets to vendor:
+The generator resource describes one or more assets to vendor in the `spec` list.
+
+## Sources
+
+### `githubRelease`
+
+Downloads an asset from a GitHub release. The destination defaults to `vendor/<metadata.name>/<asset>`.
+
+| Field            | Description                                      |
+| ---------------- | ------------------------------------------------ |
+| `source.type`    | `githubRelease`                                  |
+| `source.repo`    | The GitHub repository in `<owner>/<repo>` form.  |
+| `source.version` | The release tag to download.                     |
+| `source.asset`   | The release asset filename.                      |
 
 ```yaml
 apiVersion: kustomize-plugins.midiparse.github.com/v1alpha1
@@ -54,17 +66,17 @@ spec:
       repo: kubernetes-sigs/agent-sandbox
       version: v1.0.7
       asset: sandbox-with-extensions.yaml
-status:
-  - destination: vendor/sandbox-with-extensions.yaml
-    hash: sha256:917727e6592a27b50fdd5d740eab3689654b3b19764dccf48115536badeb4f23
-    source:
-      type: githubRelease
-      repo: kubernetes-sigs/agent-sandbox
-      version: v1.0.7
-      asset: sandbox-with-extensions.yaml
 ```
 
-For generic HTTP resources:
+### `http`
+
+Downloads a resource from a generic HTTP or HTTPS URL. The destination defaults to `vendor/<metadata.name>/<filename>`, derived from
+the URL path.
+
+| Field         | Description                                             |
+| ------------- | ------------------------------------------------------- |
+| `source.type` | `http`                                                  |
+| `source.url`  | The HTTP or HTTPS URL to fetch the resource from.       |
 
 ```yaml
 apiVersion: kustomize-plugins.midiparse.github.com/v1alpha1
@@ -76,49 +88,22 @@ metadata:
       exec:
         path: kustomize-plugin-vendorkustomization
 spec:
-  source:
-    type: http
-    url: https://example.com/manifests/app.yaml
-status:
-  destination: vendor/app.yaml
-  hash: sha256:15b26ee850239a086b5d363f57454b4730e5387113f571833d0339cef95b0266
-  source:
-    type: http
-    url: https://example.com/manifests/app.yaml
+  - source:
+      type: http
+      url: https://example.com/manifests/app.yaml
 ```
 
-`spec` accepts either a single item or a list of items. When a list is used, `status` is written back as a list as
-well; a single item is written back as a single mapping.
+## Common fields
 
-## Fields
+- `spec`: A list of items.
+- `spec[].source.type`: The source type. Either `githubRelease` or `http`. See [Sources](#sources).
+- `spec[].destination`: (Optional) Where to write the asset, relative to `vendor/<metadata.name>`.
+  Overrides the per-source default.
 
-- `spec`: A single item or a list of items.
-- `spec[].source.type`: The source type. Either `githubRelease` or `http`.
-- `spec[].source.repo`: (When type is `githubRelease`) The GitHub repository in `<owner>/<repo>` form.
-- `spec[].source.version`: (When type is `githubRelease`) The release tag to download.
-- `spec[].source.asset`: (When type is `githubRelease`) The release asset filename.
-- `spec[].source.url`: (When type is `http`) The generic HTTP or HTTPS URL to fetch the resource from.
-- `spec[].destination`: (Optional) Where to write the asset, relative to the directory containing `kustomization.yaml`.
-  Defaults to `vendor/<asset>` for `githubRelease` or `vendor/<filename>` derived from the URL path for `http`.
-- `status[].destination`: The path that was written.
-- `status[].hash`: The SHA-256 of the vendored file, in `sha256:<hex>` form.
-- `status[].source`: A copy of the `source` that produced the file.
+## Lock file
 
-The `status` field is managed by the plugin. Add `status` entries to the generator file under version control so
-builds can be reproduced without downloading the asset again.
-
-## Status write-back
-
-When an asset is downloaded, the plugin updates the `status` field of the generator file on disk. It locates the file
-by checking, in order:
-
-1. An explicit `config.kolobok.szakallas.eu/file-path` or `kustomize-plugins.midiparse.github.com/file-path`
-   annotation on the generator resource.
-2. The path annotations injected by Kustomize.
-3. The `generators` entries in `kustomization.yaml`.
-4. YAML files in the current directory that contain a matching `VendorKustomization`.
-
-The update is performed at the YAML node level, so comments elsewhere in the file are preserved.
+The plugin stores a YAML list of records in `vendor/<metadata.name>.lock.yaml`. Each record contains the
+`destination`, SHA-256 `hash`, and `source` of one vendored asset.
 
 > [!TIP]
 > Pin `source.version` with a Renovate comment so version bumps are proposed automatically:
@@ -129,7 +114,7 @@ The update is performed at the YAML node level, so comments elsewhere in the fil
 > ```
 >
 > Renovate updates the `version` field in place, and the plugin re-downloads the asset on the next build because the
-> recorded `status.source.version` no longer matches.
+> locked `source.version` no longer matches.
 >
 > Generator files are not package manifests, so declare a custom manager. Adjust `managerFilePatterns` to match your
 > generator file layout:
