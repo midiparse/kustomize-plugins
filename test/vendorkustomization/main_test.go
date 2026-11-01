@@ -24,7 +24,9 @@ func TestVendorKustomization(t *testing.T) {
 
 func TestDownloadAndWriteLock(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: downloaded\n")
+		if _, err := fmt.Fprint(w, "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: downloaded\n"); err != nil {
+			t.Errorf("write manifest: %v", err)
+		}
 	}))
 	defer server.Close()
 	dir := t.TempDir()

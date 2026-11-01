@@ -10,8 +10,8 @@ JSON Schema: [`schema/vendorkustomization.schema.json`](../schema/vendorkustomiz
 
 The plugin operates as a Kustomize exec generator. For each entry in `spec` it:
 
-1. Resolves the destination path, either from `destination`, as `vendor/<metadata.name>/<asset>` for `githubRelease`, or as
-   `vendor/<metadata.name>/<filename>` derived from the URL for `http`.
+1. Resolves the destination path, either from `destination`, as `vendor/<metadata.name>/<asset>` for
+   `githubRelease`, or as `vendor/<metadata.name>/<filename>` derived from the URL for `http`.
 2. Looks for a matching entry in the lock file for that destination.
 3. Treats the item as a cache hit when:
    - the file exists at the destination,
@@ -70,8 +70,8 @@ spec:
 
 ### `http`
 
-Downloads a resource from a generic HTTP or HTTPS URL. The destination defaults to `vendor/<metadata.name>/<filename>`, derived from
-the URL path.
+Downloads a resource from a generic HTTP or HTTPS URL. The destination defaults to
+`vendor/<metadata.name>/<filename>`, derived from the URL path.
 
 | Field         | Description                                             |
 | ------------- | ------------------------------------------------------- |
