@@ -107,8 +107,8 @@
           inherit (inputs) nixpkgs flake-utils;
         };
       in
-      inputs.flake-utils.lib.eachSystem (builtins.attrNames flake.packages) (system: {
-        default = flake.packages.${system}.default;
-      });
+      {
+        default = flake.packages.${pkgs.system};
+      };
   };
 }
