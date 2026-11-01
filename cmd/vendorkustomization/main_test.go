@@ -3,11 +3,12 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -22,370 +23,12 @@ type mockFetcher struct {
 	err    error
 }
 
-func (m *mockFetcher) Fetch(ctx context.Context, repo, version, asset string) ([]byte, error) {
+func (m *mockFetcher) RoundTrip(req *http.Request) (*http.Response, error) {
 	m.called = true
-	return m.data, m.err
-}
-
-func TestCacheHitWithoutNetwork(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	manifestContent := `apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: cached-cm
-data:
-  key: cached-val
-`
-	vendorPath := filepath.Join("vendor", "test-asset.yaml")
-	require.NoError(t, os.MkdirAll(filepath.Dir(vendorPath), 0755))
-	require.NoError(t, os.WriteFile(vendorPath, []byte(manifestContent), 0644))
-
-	hash := fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(manifestContent)))
-
-	genContent := fmt.Sprintf(`apiVersion: kustomize-plugins.midiparse.github.com/v1alpha1
-kind: VendorKustomization
-metadata:
-  name: test-cache-hit
-spec:
-  source:
-    type: githubRelease
-    repo: example/test-repo
-    # renovate: datasource=github-releases depName=example/test-repo
-    version: v1.0.0
-    asset: test-asset.yaml
-status:
-  destination: %s
-  hash: %s
-  source:
-    type: githubRelease
-    repo: example/test-repo
-    version: v1.0.0
-    asset: test-asset.yaml
-`, vendorPath, hash)
-	genPath := filepath.Join(tmpDir, "generator.yaml")
-	require.NoError(t, os.WriteFile(genPath, []byte(genContent), 0644))
-
-	mock := &mockFetcher{}
-
-	api := &API{
-		APIVersion: "kustomize-plugins.midiparse.github.com/v1alpha1",
-		Metadata:   Metadata{Name: "test-cache-hit"},
-		Fetcher:    mock,
-		Spec: SpecUnion{
-			IsSingle: true,
-			Items: []SpecItem{
-				{
-					Source: &GithubReleaseSource{
-						Type:    "githubRelease",
-						Repo:    "example/test-repo",
-						Version: "v1.0.0",
-						Asset:   "test-asset.yaml",
-					},
-					Destination: vendorPath,
-				},
-			},
-		},
-		Status: StatusUnion{
-			IsSingle: true,
-			Items: []StatusItem{
-				{
-					Destination: vendorPath,
-					Hash:        hash,
-					Source: &GithubReleaseSource{
-						Type:    "githubRelease",
-						Repo:    "example/test-repo",
-						Version: "v1.0.0",
-						Asset:   "test-asset.yaml",
-					},
-				},
-			},
-		},
+	if m.err != nil {
+		return nil, m.err
 	}
-
-	nodes, err := api.Filter(nil)
-	require.NoError(t, err)
-	assert.False(t, mock.called, "fetcher should NOT be called on cache hit")
-	require.Len(t, nodes, 1)
-	assert.Equal(t, "ConfigMap", nodes[0].GetKind())
-	assert.Equal(t, "cached-cm", nodes[0].GetName())
-
-	// Verify generator file content was untouched
-	afterContent, err := os.ReadFile(genPath)
-	require.NoError(t, err)
-	assert.Equal(t, genContent, string(afterContent))
-}
-
-func TestCacheMissDownloadAndStatusWriteBackWithComments(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	genContent := `apiVersion: kustomize-plugins.midiparse.github.com/v1alpha1
-kind: VendorKustomization
-metadata:
-  name: agent-sandbox
-  annotations:
-    config.kubernetes.io/function: |
-      exec:
-        path: kustomize-plugin-vendorkustomization
-spec:
-  source:
-    type: githubRelease
-    repo: kubernetes-sigs/agent-sandbox
-    # renovate: datasource=github-releases depName=kubernetes-sigs/agent-sandbox
-    version: v1.0.7
-    asset: sandbox-with-extensions.yaml
-`
-	genPath := filepath.Join(tmpDir, "agent-sandbox.yaml")
-	require.NoError(t, os.WriteFile(genPath, []byte(genContent), 0644))
-
-	kustContent := `apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-generators:
-  - agent-sandbox.yaml
-`
-	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "kustomization.yaml"), []byte(kustContent), 0644))
-
-	downloadedYaml := `apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: sandbox-controller
-spec:
-  replicas: 1
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: sandbox-service
-`
-	mock := &mockFetcher{data: []byte(downloadedYaml)}
-
-	api := &API{
-		APIVersion: "kustomize-plugins.midiparse.github.com/v1alpha1",
-		Metadata:   Metadata{Name: "agent-sandbox"},
-		Fetcher:    mock,
-		Spec: SpecUnion{
-			IsSingle: true,
-			Items: []SpecItem{
-				{
-					Source: &GithubReleaseSource{
-						Type:    "githubRelease",
-						Repo:    "kubernetes-sigs/agent-sandbox",
-						Version: "v1.0.7",
-						Asset:   "sandbox-with-extensions.yaml",
-					},
-				},
-			},
-		},
-	}
-
-	nodes, err := api.Filter(nil)
-	require.NoError(t, err)
-	assert.True(t, mock.called, "fetcher should have been called on cache miss")
-	require.Len(t, nodes, 2)
-	assert.Equal(t, "Deployment", nodes[0].GetKind())
-	assert.Equal(t, "Service", nodes[1].GetKind())
-
-	// Verify file was written to default destination vendor/sandbox-with-extensions.yaml
-	expectedDest := filepath.Join("vendor", "sandbox-with-extensions.yaml")
-	writtenBytes, err := os.ReadFile(expectedDest)
-	require.NoError(t, err)
-	assert.Equal(t, downloadedYaml, string(writtenBytes))
-
-	// Verify status write-back to agent-sandbox.yaml
-	updatedGenBytes, err := os.ReadFile(genPath)
-	require.NoError(t, err)
-	updatedGenStr := string(updatedGenBytes)
-
-	assert.Contains(t, updatedGenStr, "# renovate: datasource=github-releases depName=kubernetes-sigs/agent-sandbox")
-	assert.Contains(t, updatedGenStr, "status:")
-	assert.Contains(t, updatedGenStr, "destination: vendor/sandbox-with-extensions.yaml")
-	expectedHash := fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(downloadedYaml)))
-	assert.Contains(t, updatedGenStr, expectedHash)
-
-	// Second run: should be a cache hit now!
-	mock.called = false
-	var updatedAPI API
-	require.NoError(t, yaml.Unmarshal(updatedGenBytes, &updatedAPI))
-	updatedAPI.Fetcher = mock
-	nodes2, err := updatedAPI.Filter(nil)
-	require.NoError(t, err)
-	assert.False(t, mock.called, "second run should be cache hit")
-	require.Len(t, nodes2, 2)
-}
-
-func TestStatusWriteBackSelectsMatchingDocument(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	genContent := `apiVersion: kustomize-plugins.midiparse.github.com/v1alpha1
-kind: VendorKustomization
-metadata:
-  name: other
-# keep-first
-spec:
-  source:
-    type: githubRelease
-    repo: other/repo
-    version: v1.0.0
-    asset: other.yaml
-status:
-  destination: vendor/other.yaml
-  hash: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-  source:
-    type: githubRelease
-    repo: other/repo
-    version: v1.0.0
-    asset: other.yaml
----
-apiVersion: example.com/v1alpha1
-kind: VendorKustomization
-metadata:
-  name: target
-# keep-second
-spec:
-  source:
-    type: githubRelease
-    repo: example/repo
-    version: v1.0.0
-    asset: target.yaml
-status:
-  destination: vendor/old-target.yaml
-  hash: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-  source:
-    type: githubRelease
-    repo: example/repo
-    version: v1.0.0
-    asset: target.yaml
----
-apiVersion: kustomize-plugins.midiparse.github.com/v1alpha1
-kind: VendorKustomization
-metadata:
-  name: target
-# keep-third
-spec:
-  source:
-    type: githubRelease
-    repo: example/repo
-    version: v1.0.0
-    asset: target.yaml
-`
-	genPath := filepath.Join(tmpDir, "generators.yaml")
-	require.NoError(t, os.WriteFile(genPath, []byte(genContent), 0644))
-
-	kustContent := `apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-generators:
-  - generators.yaml
-`
-	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "kustomization.yaml"), []byte(kustContent), 0644))
-
-	downloaded := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: target-cm\n"
-	api := &API{
-		APIVersion: "kustomize-plugins.midiparse.github.com/v1alpha1",
-		Metadata:   Metadata{Name: "target"},
-		Fetcher:    &mockFetcher{data: []byte(downloaded)},
-		Spec: SpecUnion{
-			IsSingle: true,
-			Items: []SpecItem{
-				{
-					Source: &GithubReleaseSource{
-						Type:    "githubRelease",
-						Repo:    "example/repo",
-						Version: "v1.0.0",
-						Asset:   "target.yaml",
-					},
-				},
-			},
-		},
-	}
-
-	_, err := api.Filter(nil)
-	require.NoError(t, err)
-
-	updated, err := os.ReadFile(genPath)
-	require.NoError(t, err)
-	updatedStr := string(updated)
-
-	docs, err := decodeDocuments(updated)
-	require.NoError(t, err)
-	require.Len(t, docs, 3)
-
-	assert.Contains(t, updatedStr, "# keep-first")
-	assert.Contains(t, updatedStr, "# keep-second")
-	assert.Contains(t, updatedStr, "# keep-third")
-	assert.Equal(t, 1, strings.Count(updatedStr, "destination: vendor/target.yaml"))
-	assert.Contains(t, updatedStr, "destination: vendor/other.yaml")
-	assert.Contains(t, updatedStr, "hash: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-	assert.Contains(t, updatedStr, "hash: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-	assert.Contains(t, updatedStr, fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(downloaded))))
-}
-
-func TestArraySourcesSupport(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	genContent := `apiVersion: kustomize-plugins.midiparse.github.com/v1alpha1
-kind: VendorKustomization
-metadata:
-  name: multi-source
-spec:
-  - source:
-      type: githubRelease
-      repo: repo1/proj
-      version: v1.0.0
-      asset: first.yaml
-    destination: custom/first.yaml
-  - source:
-      type: githubRelease
-      repo: repo2/proj
-      version: v2.0.0
-      asset: second.yaml
-`
-	genPath := filepath.Join(tmpDir, "multi.yaml")
-	require.NoError(t, os.WriteFile(genPath, []byte(genContent), 0644))
-
-	firstData := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm-first\n"
-	secondData := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm-second\n"
-
-	mock := &mockMultiFetcher{
-		responses: map[string][]byte{
-			"repo1/proj@v1.0.0/first.yaml":  []byte(firstData),
-			"repo2/proj@v2.0.0/second.yaml": []byte(secondData),
-		},
-	}
-
-	var api API
-	require.NoError(t, yaml.Unmarshal([]byte(genContent), &api))
-	api.Fetcher = mock
-	assert.False(t, api.Spec.IsSingle)
-	require.Len(t, api.Spec.Items, 2)
-
-	nodes, err := api.Filter(nil)
-	require.NoError(t, err)
-	require.Len(t, nodes, 2)
-	assert.Equal(t, "cm-first", nodes[0].GetName())
-	assert.Equal(t, "cm-second", nodes[1].GetName())
-
-	// Verify multi-status sequence write-back
-	updatedGenBytes, err := os.ReadFile(genPath)
-	require.NoError(t, err)
-	updatedGenStr := string(updatedGenBytes)
-	assert.Contains(t, updatedGenStr, "- destination: custom/first.yaml")
-	assert.Contains(t, updatedGenStr, "- destination: vendor/second.yaml")
-}
-
-type mockMultiFetcher struct {
-	responses map[string][]byte
-}
-
-func (m *mockMultiFetcher) Fetch(ctx context.Context, repo, version, asset string) ([]byte, error) {
-	key := fmt.Sprintf("%s@%s/%s", repo, version, asset)
-	if data, ok := m.responses[key]; ok {
-		return data, nil
-	}
-	return nil, fmt.Errorf("not found: %s", key)
+	return &http.Response{StatusCode: 200, Status: "200 OK", Body: io.NopCloser(strings.NewReader(string(m.data))), Header: make(http.Header)}, nil
 }
 
 func TestHTTPFetcherLiveServer(t *testing.T) {
@@ -402,13 +45,14 @@ func TestHTTPFetcherLiveServer(t *testing.T) {
 
 	t.Setenv("GITHUB_BASE_URL", server.URL)
 
-	dl := &HTTPFetcher{}
-	data, err := dl.Fetch(context.Background(), "myorg/myrepo", "v1.2.3", "test-asset.yaml")
+	dl := &GithubReleaseSource{Repo: "myorg/myrepo", Version: "v1.2.3", Asset: "test-asset.yaml"}
+	data, err := dl.Fetch(context.Background(), nil)
 	require.NoError(t, err)
 	assert.Equal(t, manifest, string(data))
 
 	// Test 404
-	_, err = dl.Fetch(context.Background(), "myorg/myrepo", "v1.2.3", "notfound.yaml")
+	dl.Asset = "notfound.yaml"
+	_, err = dl.Fetch(context.Background(), nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "404")
 }
@@ -421,17 +65,14 @@ func TestInputFiltering(t *testing.T) {
 	api := &API{
 		APIVersion: "kustomize-plugins.midiparse.github.com/v1alpha1",
 		Metadata:   Metadata{Name: "my-generator"},
-		Fetcher:    &mockFetcher{data: []byte(downloaded)},
-		Spec: SpecUnion{
-			IsSingle: true,
-			Items: []SpecItem{
-				{
-					Source: &GithubReleaseSource{
-						Type:    "githubRelease",
-						Repo:    "my/repo",
-						Version: "v1.0.0",
-						Asset:   "res.yaml",
-					},
+		Client:     &http.Client{Transport: &mockFetcher{data: []byte(downloaded)}},
+		Spec: []SpecItem{
+			{
+				Source: &GithubReleaseSource{
+					Type:    "githubRelease",
+					Repo:    "my/repo",
+					Version: "v1.0.0",
+					Asset:   "res.yaml",
 				},
 			},
 		},
@@ -442,11 +83,11 @@ kind: VendorKustomization
 metadata:
   name: my-generator
 spec:
-  source:
-    type: githubRelease
-    repo: my/repo
-    version: v1.0.0
-    asset: res.yaml
+  - source:
+      type: githubRelease
+      repo: my/repo
+      version: v1.0.0
+      asset: res.yaml
 `
 	require.NoError(t, os.WriteFile("my-generator.yaml", []byte(genYaml), 0644))
 
@@ -471,11 +112,11 @@ kind: VendorKustomization
 metadata:
   name: invalid
 spec:
-  source:
-    type: helm
-    repo: example/repo
-    version: v1.0.0
-    asset: chart.yaml
+  - source:
+      type: helm
+      repo: example/repo
+      version: v1.0.0
+      asset: chart.yaml
 `), &api)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported source type")
@@ -486,17 +127,14 @@ func TestValidationErrors(t *testing.T) {
 		return &API{
 			APIVersion: "kustomize-plugins.midiparse.github.com/v1alpha1",
 			Metadata:   Metadata{Name: "validation"},
-			Fetcher:    &mockFetcher{},
-			Spec: SpecUnion{
-				IsSingle: true,
-				Items: []SpecItem{
-					{
-						Source: &GithubReleaseSource{
-							Type:    "githubRelease",
-							Repo:    "owner/repo",
-							Version: "v1.0.0",
-							Asset:   "asset.yaml",
-						},
+			Client:     &http.Client{Transport: &mockFetcher{}},
+			Spec: []SpecItem{
+				{
+					Source: &GithubReleaseSource{
+						Type:    "githubRelease",
+						Repo:    "owner/repo",
+						Version: "v1.0.0",
+						Asset:   "asset.yaml",
 					},
 				},
 			},
@@ -511,49 +149,131 @@ func TestValidationErrors(t *testing.T) {
 		{
 			name: "unsupported source type",
 			mutate: func(api *API) {
-				api.Spec.Items[0].Source.(*GithubReleaseSource).Type = "invalidType"
+				api.Spec[0].Source.(*GithubReleaseSource).Type = "invalidType"
 			},
 			want: "unsupported source type",
 		},
 		{
 			name: "repo without owner",
 			mutate: func(api *API) {
-				api.Spec.Items[0].Source.(*GithubReleaseSource).Repo = "no-slash"
+				api.Spec[0].Source.(*GithubReleaseSource).Repo = "no-slash"
 			},
 			want: "<owner>/<repo>",
 		},
 		{
 			name: "missing version",
 			mutate: func(api *API) {
-				api.Spec.Items[0].Source.(*GithubReleaseSource).Version = ""
+				api.Spec[0].Source.(*GithubReleaseSource).Version = ""
 			},
 			want: "source.version must be specified",
 		},
 		{
 			name: "missing asset",
 			mutate: func(api *API) {
-				api.Spec.Items[0].Source.(*GithubReleaseSource).Asset = ""
+				api.Spec[0].Source.(*GithubReleaseSource).Asset = ""
 			},
 			want: "source.asset must be specified",
 		},
 		{
 			name: "absolute destination",
 			mutate: func(api *API) {
-				api.Spec.Items[0].Destination = "/tmp/asset.yaml"
+				api.Spec[0].Destination = "/tmp/asset.yaml"
 			},
 			want: "must be a relative path",
 		},
 		{
 			name: "destination escapes project",
 			mutate: func(api *API) {
-				api.Spec.Items[0].Destination = "../asset.yaml"
+				api.Spec[0].Destination = "../asset.yaml"
 			},
 			want: "must be a relative path",
 		},
 		{
 			name: "default destination escapes project",
 			mutate: func(api *API) {
-				api.Spec.Items[0].Source.(*GithubReleaseSource).Asset = "../../asset.yaml"
+				api.Spec[0].Source.(*GithubReleaseSource).Asset = "../../asset.yaml"
+			},
+			want: "must be a relative path",
+		},
+		{
+			name: "http unsupported source type",
+			mutate: func(api *API) {
+				api.Spec[0].Source = &HTTPSource{
+					Type: "notHttp",
+					URL:  "https://example.com/res.yaml",
+				}
+			},
+			want: "unsupported source type",
+		},
+		{
+			name: "http missing url",
+			mutate: func(api *API) {
+				api.Spec[0].Source = &HTTPSource{
+					Type: "http",
+					URL:  "",
+				}
+			},
+			want: "source.url must be specified",
+		},
+		{
+			name: "http invalid url scheme",
+			mutate: func(api *API) {
+				api.Spec[0].Source = &HTTPSource{
+					Type: "http",
+					URL:  "ftp://example.com/res.yaml",
+				}
+			},
+			want: "source.url scheme must be http or https",
+		},
+		{
+			name: "http missing host",
+			mutate: func(api *API) {
+				api.Spec[0].Source = &HTTPSource{
+					Type: "http",
+					URL:  "http:///res.yaml",
+				}
+			},
+			want: "must include a host",
+		},
+		{
+			name: "http default destination cannot be determined",
+			mutate: func(api *API) {
+				api.Spec[0].Source = &HTTPSource{
+					Type: "http",
+					URL:  "http://example.com/",
+				}
+			},
+			want: "must be a relative path",
+		},
+		{
+			name: "http default destination escapes project",
+			mutate: func(api *API) {
+				api.Spec[0].Source = &HTTPSource{
+					Type: "http",
+					URL:  "http://example.com/..",
+				}
+			},
+			want: "must be a relative path",
+		},
+		{
+			name: "http absolute destination",
+			mutate: func(api *API) {
+				api.Spec[0].Source = &HTTPSource{
+					Type: "http",
+					URL:  "https://example.com/res.yaml",
+				}
+				api.Spec[0].Destination = "/tmp/res.yaml"
+			},
+			want: "must be a relative path",
+		},
+		{
+			name: "http destination escapes project",
+			mutate: func(api *API) {
+				api.Spec[0].Source = &HTTPSource{
+					Type: "http",
+					URL:  "https://example.com/res.yaml",
+				}
+				api.Spec[0].Destination = "../res.yaml"
 			},
 			want: "must be a relative path",
 		},
@@ -570,5 +290,145 @@ func TestValidationErrors(t *testing.T) {
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.want)
 		})
+	}
+}
+
+func TestHTTPFetcherFetchURL(t *testing.T) {
+	manifest := "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: http-ns\n"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/raw/namespace.yaml" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(manifest))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	dl := &HTTPSource{URL: server.URL + "/raw/namespace.yaml"}
+	data, err := dl.Fetch(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Equal(t, manifest, string(data))
+
+	// Test 404
+	dl.URL = server.URL + "/raw/notfound.yaml"
+	_, err = dl.Fetch(context.Background(), nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "404")
+}
+
+func TestConfigurationRequiresLists(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		json  bool
+	}{
+		{name: "YAML spec mapping", input: "spec:\n  source:\n    type: http\n    url: https://example.com/test.yaml\n"},
+		{name: "JSON spec mapping", input: `{"spec":{"source":{"type":"http","url":"https://example.com/test.yaml"}}}`, json: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var api API
+			if tt.json {
+				require.Error(t, json.Unmarshal([]byte(tt.input), &api))
+				return
+			}
+			require.Error(t, yaml.Unmarshal([]byte(tt.input), &api))
+		})
+	}
+}
+
+func TestLockFileReconciliation(t *testing.T) {
+	t.Chdir(t.TempDir())
+	manifest := []byte("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: downloaded\n")
+	mock := &mockFetcher{data: manifest}
+	api := &API{Metadata: Metadata{Name: "example"}, Client: &http.Client{Transport: mock}, Spec: []SpecItem{
+		{Source: &HTTPSource{Type: "http", URL: "https://example.com/one.yaml"}},
+		{Source: &HTTPSource{Type: "http", URL: "https://example.com/two.yaml"}},
+	}}
+	nodes, err := api.Filter(nil)
+	require.NoError(t, err)
+	require.Len(t, nodes, 2)
+	require.True(t, mock.called)
+	lockPath := "vendor/example.lock.yaml"
+	status, err := readLock(lockPath)
+	require.NoError(t, err)
+	require.Len(t, status, 2)
+	assert.Equal(t, "vendor/example/one.yaml", status[0].Destination)
+	assert.Equal(t, fmt.Sprintf("sha256:%x", sha256.Sum256(manifest)), status[0].Hash)
+	lockBefore, err := os.ReadFile(lockPath)
+	require.NoError(t, err)
+
+	mock.called = false
+	_, err = api.Filter(nil)
+	require.NoError(t, err)
+	assert.False(t, mock.called)
+	lockAfter, err := os.ReadFile(lockPath)
+	require.NoError(t, err)
+	assert.Equal(t, lockBefore, lockAfter)
+
+	api.Spec = api.Spec[:1]
+	_, err = api.Filter(nil)
+	require.NoError(t, err)
+	assert.False(t, mock.called)
+	status, err = readLock(lockPath)
+	require.NoError(t, err)
+	require.Len(t, status, 1)
+	assert.Equal(t, "vendor/example/one.yaml", status[0].Destination)
+
+	require.NoError(t, os.WriteFile("vendor/example/one.yaml", []byte("modified"), 0644))
+	_, err = api.Filter(nil)
+	require.NoError(t, err)
+	assert.True(t, mock.called)
+
+	mock.called = false
+	api.Spec[0].Source = &HTTPSource{Type: "http", URL: "https://example.com/changed.yaml"}
+	api.Spec[0].Destination = "one.yaml"
+	_, err = api.Filter(nil)
+	require.NoError(t, err)
+	assert.True(t, mock.called)
+	status, err = readLock(lockPath)
+	require.NoError(t, err)
+	assert.Equal(t, "https://example.com/changed.yaml", status[0].Source.(*HTTPSource).URL)
+}
+
+func TestInvalidLockDoesNotDownload(t *testing.T) {
+	t.Chdir(t.TempDir())
+	require.NoError(t, os.MkdirAll("vendor", 0755))
+	require.NoError(t, os.WriteFile("vendor/example.lock.yaml", []byte("not: a list\n"), 0644))
+	mock := &mockFetcher{}
+	api := &API{Metadata: Metadata{Name: "example"}, Client: &http.Client{Transport: mock}, Spec: []SpecItem{{Source: &HTTPSource{Type: "http", URL: "https://example.com/one.yaml"}}}}
+	_, err := api.Filter(nil)
+	require.ErrorContains(t, err, "parse lock file")
+	assert.False(t, mock.called)
+}
+
+func TestLockPathValidation(t *testing.T) {
+	t.Chdir(t.TempDir())
+	for _, name := range []string{"", "..", "../outside"} {
+		t.Run(name, func(t *testing.T) {
+			api := &API{Metadata: Metadata{Name: name}, Spec: []SpecItem{{Source: &HTTPSource{Type: "http", URL: "https://example.com/one.yaml"}}}}
+			_, err := api.Filter(nil)
+			require.ErrorContains(t, err, "metadata.name")
+		})
+	}
+}
+
+func TestGeneratorVendorDirectories(t *testing.T) {
+	t.Chdir(t.TempDir())
+	for _, name := range []string{"first", "second"} {
+		manifest := []byte("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: " + name + "\n")
+		mock := &mockFetcher{data: manifest}
+		api := &API{Metadata: Metadata{Name: name}, Client: &http.Client{Transport: mock}, Spec: []SpecItem{
+			{Source: &HTTPSource{Type: "http", URL: "https://example.com/asset.yaml"}},
+			{Source: &HTTPSource{Type: "http", URL: "https://example.com/another.yaml"}, Destination: "nested/custom.yaml"},
+		}}
+		_, err := api.Filter(nil)
+		require.NoError(t, err)
+		for _, path := range []string{"vendor/" + name + "/asset.yaml", "vendor/" + name + "/nested/custom.yaml"} {
+			got, err := os.ReadFile(path)
+			require.NoError(t, err)
+			assert.Equal(t, manifest, got)
+		}
 	}
 }

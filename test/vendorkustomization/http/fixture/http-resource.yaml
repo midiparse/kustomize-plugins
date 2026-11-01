@@ -1,0 +1,12 @@
+apiVersion: kustomize-plugins.midiparse.github.com/v1alpha1
+kind: VendorKustomization
+metadata:
+  name: http-resource
+  annotations:
+    config.kubernetes.io/function: |
+      exec:
+        path: kustomize-plugin-vendorkustomization
+spec:
+  - source:
+      type: http
+      url: https://example.com/resources/http-resource.yaml
